@@ -1,0 +1,13 @@
+version: "0.0.1"
+description: "MicroWakeWord Standalone Component"
+license: "GPLv3"
+tags:
+  - microwakeword
+  - wakeword
+  - hotword
+  - component
+
+dependencies:
+  espressif/esp-tflite-micro: "*"
+  ESPMicroSpeechFeatures:
+    git: https://github.com/0xD34D/ESPMicroSpeechFeatures.git
