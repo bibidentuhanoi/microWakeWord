@@ -13,3 +13,6 @@ dependencies:
 ## Example
 
 An example of how to use this component can be found in the `examples` folder. This example demonstrates how to initialize the micro wake word component, configure it, and handle wake word detection events.
+
+### Thanks
+This project would not even exist had it not been for all the hard work done by [@kahrendt](https://www.github.com/kahrendt) and the [ESPHome](https://github.com/esphome) team.
