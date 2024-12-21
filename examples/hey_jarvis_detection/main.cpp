@@ -35,7 +35,8 @@ void wakeWordDetectionTask(void *params) {
   microphone.set_sample_rate(SAMPLE_RATE_HZ);
   microphone.set_bits_per_sample(I2S_DATA_BIT_WIDTH_32BIT);
   wakeWord.set_microphone(&microphone);
-  wakeWord.add_wake_word_model(model, 0.97f, 5, "Hey Jarvis", INT16_MAX * 2);
+  wakeWord.add_wake_word_model(model, 0.97f, 5, "Hey Jarvis",
+                               hey_jarvis_tflite_len);
   wakeWord.set_features_step_size(10);
   wakeWord.add_detection_callback(&wakeWordDetected);
 
