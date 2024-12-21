@@ -93,6 +93,8 @@ bool StreamingModel::load_model(
     }
   }
 
+  ESP_LOGI(TAG, "Actual tensor arena size is %d", this->interpreter_->arena_used_bytes());
+
   return true;
 }
 
