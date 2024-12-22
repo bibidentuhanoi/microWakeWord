@@ -63,7 +63,7 @@ namespace esphome
                                const std::string &wake_word,
                                size_t tensor_arena_size);
 
-      void add_detection_callback(std::function<void(void)> &&detection_callback)
+      void add_detection_callback(std::function<void(std::string)> &&detection_callback)
       {
         this->detection_callbacks_.add(std::move(detection_callback));
       }
@@ -108,7 +108,7 @@ namespace esphome
 
       bool detected_{false};
       std::string detected_wake_word_{""};
-      CallbackManager<void(void)> detection_callbacks_{};
+      CallbackManager<void(std::string)> detection_callbacks_{};
 
       void set_state_(State state);
 

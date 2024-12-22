@@ -166,8 +166,8 @@ namespace esphome
           {
             // this->wake_word_detected_trigger_->trigger(this->detected_wake_word_);
             this->detected_ = false;
+            this->detection_callbacks_.call(this->detected_wake_word_);
             this->detected_wake_word_ = "";
-            this->detection_callbacks_.call();
           }
         }
         break;
