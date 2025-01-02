@@ -16,10 +16,10 @@
 
 bool gDetected = false;
 
-void wakeWordDetected();
+void wakeWordDetected(std::string detected_wake_word);
 void wakeWordDetectionTask(void *params);
 
-void wakeWordDetected() { gDetected = true; }
+void wakeWordDetected(std::string detected_wake_word) { gDetected = true; }
 
 void wakeWordDetectionTask(void *params) {
   esphome::i2s_audio::I2SAudioMicrophone microphone;
