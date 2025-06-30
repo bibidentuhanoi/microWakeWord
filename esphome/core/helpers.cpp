@@ -39,9 +39,13 @@
 #include <limits>
 #include <random>
 #endif
-#ifdef USE_ESP32
+#ifdef CONFIG_IDF_TARGET_ESP32
 #include "esp32/rom/crc.h"
-#endif
+#elif CONFIG_IDF_TARGET_ESP32S2
+#include "esp32s2/rom/crc.h"
+#elif CONFIG_IDF_TARGET_ESP32S3
+#include "esp32s3/rom/crc.h"
+#endif // CONFIG_IDF_TARGET_ESP32
 
 #if defined(CONFIG_SOC_IEEE802154_SUPPORTED) || defined(USE_ESP32_IGNORE_EFUSE_MAC_CRC)
 #include "esp_efuse.h"
