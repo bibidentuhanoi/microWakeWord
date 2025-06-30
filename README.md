@@ -7,7 +7,7 @@ To use this component in your project simply add it as a dependency like so:
 ```
 dependencies:
   micro_wake_word:
-    git: https://github.com/0xD34D/micro_wake_word_standalone.git
+    git: https://github.com/bibidentuhanoi/microWakeWord
 ```
 
 ## Example
