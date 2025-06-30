@@ -92,9 +92,9 @@ namespace esphome
             .clk_cfg = {
                 .sample_rate_hz = this->sample_rate_,
                 .clk_src = I2S_CLK_SRC_DEFAULT,
-                .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+                .mclk_multiple = I2S_MCLK_MULTIPLE_1024,
             },
-            .slot_cfg = I2S_STD_PCM_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
+            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
             .gpio_cfg = {
                 .mclk = this->mclk_pin_, // some codecs may require mclk signal, this example doesn't need it
                 .bclk = this->bclk_pin_,
