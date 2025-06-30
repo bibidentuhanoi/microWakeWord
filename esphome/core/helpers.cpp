@@ -40,7 +40,7 @@
 #include <random>
 #endif
 #ifdef USE_ESP32
-#include "esp32s3/rom/crc.h"
+#include "esp32/rom/crc.h"
 #endif
 
 #if defined(CONFIG_SOC_IEEE802154_SUPPORTED) || defined(USE_ESP32_IGNORE_EFUSE_MAC_CRC)
