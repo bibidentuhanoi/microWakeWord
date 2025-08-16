@@ -198,7 +198,7 @@ namespace esphome
       }
       else if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT)
       {
-        std::vector<int16_t> samples;
+        static std::vector<int16_t> conversion_buffer;
         size_t samples_read = bytes_read / sizeof(int32_t);
         samples.resize(samples_read);
         for (size_t i = 0; i < samples_read; i++)
@@ -218,7 +218,7 @@ namespace esphome
 
     void I2SAudioMicrophone::read_()
     {
-      std::vector<int16_t> samples;
+      static std::vector<int16_t> conversion_buffer;
       samples.resize(BUFFER_SIZE);
       size_t bytes_read = this->read(samples.data(), BUFFER_SIZE / sizeof(int16_t));
       samples.resize(bytes_read / sizeof(int16_t));
