@@ -8,6 +8,7 @@
 #include <driver/i2s_std.h>
 #endif
 #include <esp_log.h>
+#include <vector> 
 
 namespace esphome
 {
@@ -96,7 +97,7 @@ namespace esphome
             },
             .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
             .gpio_cfg = {
-                .mclk = this->mclk_pin_, // some codecs may require mclk signal, this example doesn't need it
+                .mclk = this->mclk_pin_, 
                 .bclk = this->bclk_pin_,
                 .ws = this->lrclk_pin_,
                 .dout = I2S_GPIO_UNUSED,
@@ -199,14 +200,15 @@ namespace esphome
       else if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT)
       {
         static std::vector<int16_t> conversion_buffer;
+        
         size_t samples_read = bytes_read / sizeof(int32_t);
-        samples.resize(samples_read);
+        conversion_buffer.resize(samples_read);
         for (size_t i = 0; i < samples_read; i++)
         {
           int32_t temp = reinterpret_cast<int32_t *>(buf)[i] >> 11;
-          samples[i] = clamp<int16_t>(temp, INT16_MIN, INT16_MAX);
+          conversion_buffer[i] = clamp<int16_t>(temp, INT16_MIN, INT16_MAX);
         }
-        memcpy(buf, samples.data(), samples_read * sizeof(int16_t));
+        memcpy(buf, conversion_buffer.data(), samples_read * sizeof(int16_t));
         return samples_read * sizeof(int16_t);
       }
       else
@@ -218,11 +220,12 @@ namespace esphome
 
     void I2SAudioMicrophone::read_()
     {
-      static std::vector<int16_t> conversion_buffer;
-      samples.resize(BUFFER_SIZE);
-      size_t bytes_read = this->read(samples.data(), BUFFER_SIZE / sizeof(int16_t));
-      samples.resize(bytes_read / sizeof(int16_t));
-      this->data_callbacks_.call(samples);
+      static std::vector<int16_t> read_buffer;
+
+      read_buffer.resize(BUFFER_SIZE);
+      size_t bytes_read = this->read(read_buffer.data(), BUFFER_SIZE / sizeof(int16_t));
+      read_buffer.resize(bytes_read / sizeof(int16_t));
+      this->data_callbacks_.call(read_buffer);
     }
 
     void I2SAudioMicrophone::loop()
