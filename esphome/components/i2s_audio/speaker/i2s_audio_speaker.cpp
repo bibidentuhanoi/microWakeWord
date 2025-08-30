@@ -4,13 +4,33 @@
 
 #include <driver/i2s_std.h>
 #include <esp_log.h>
-
+#include <vector>
 namespace esphome
 {
     namespace i2s_audio
     {
 
         static const char *const TAG = "i2s_audio.speaker";
+
+        // =========================================================================
+        // NEW METHOD: set_volume
+        // =========================================================================
+        void I2SAudioSpeaker::set_volume(float volume)
+        {
+            if (volume < 0.0f)
+            {
+                this->volume_ = 0.0f;
+            }
+            else if (volume > 1.0f)
+            {
+                this->volume_ = 1.0f;
+            }
+            else
+            {
+                this->volume_ = volume;
+            }
+            ESP_LOGD(TAG, "Speaker volume set to: %.2f", this->volume_);
+        }
 
         void I2SAudioSpeaker::setup()
         {
@@ -32,7 +52,13 @@ namespace esphome
             {
                 return; // Waiting for another i2s to return lock
             }
-
+            vTaskDelay(100);
+            if (this->sd_pin_set_)
+            {
+                gpio_reset_pin(this->sd_pin_);
+                gpio_set_direction(this->sd_pin_, GPIO_MODE_OUTPUT);
+                gpio_set_level(this->sd_pin_, 1); // Enable amp
+            }
             esp_err_t err;
             i2s_chan_handle_t channel;
 
@@ -43,7 +69,7 @@ namespace esphome
                 .clk_cfg = {
                     .sample_rate_hz = this->sample_rate_,
                     .clk_src = I2S_CLK_SRC_DEFAULT,
-                    .mclk_multiple = I2S_MCLK_MULTIPLE_1024, // CHANGED FROM 1024 TO 384
+                    .mclk_multiple = I2S_MCLK_MULTIPLE_384,
                 },
                 .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
                 .gpio_cfg = {
@@ -112,7 +138,10 @@ namespace esphome
                 speaker::Speaker::status_set_error();
                 return;
             }
-
+            if (this->sd_pin_set_)
+            {
+                gpio_set_level(this->sd_pin_, 0); // Disable amp
+            }
             this->unlock();
             this->state_ = speaker::STATE_STOPPED;
             this->high_freq_.stop();
@@ -124,8 +153,57 @@ namespace esphome
             if (this->state_ != speaker::STATE_RUNNING)
                 return 0;
 
+            // If volume is at 100% (or very close), write data directly to avoid processing
+            if (this->volume_ >= 0.99f)
+            {
+                size_t bytes_written = 0;
+                esp_err_t err = i2s_channel_write(this->channel_, data, length, &bytes_written, portMAX_DELAY);
+                if (err != ESP_OK)
+                {
+                    ESP_LOGW(TAG, "Error writing to I2S speaker: %s", esp_err_to_name(err));
+                    speaker::Speaker::status_set_warning();
+                    return 0;
+                }
+                speaker::Speaker::status_clear_warning();
+                return bytes_written;
+            }
+
+            // temporary buffer for volume-adjusted audio data
+            std::vector<uint8_t> temp_buffer(length);
+
+            // volume scaling based on the bits per sample
+            if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_16BIT)
+            {
+                int16_t *samples = (int16_t *)data;
+                int16_t *temp_samples = (int16_t *)temp_buffer.data();
+                size_t num_samples = length / 2;
+                for (size_t i = 0; i < num_samples; i++)
+                {
+                    temp_samples[i] = (int16_t)((float)samples[i] * this->volume_);
+                }
+            }
+            else if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT)
+            {
+                int32_t *samples = (int32_t *)data;
+                int32_t *temp_samples = (int32_t *)temp_buffer.data();
+                size_t num_samples = length / 4;
+                for (size_t i = 0; i < num_samples; i++)
+                {
+                    // Note: This simple multiplication works for 32-bit samples but assumes
+                    // the audio isn't already at the absolute max amplitude, where clipping could occur.
+                    // For voice, this is generally safe.
+                    temp_samples[i] = (int32_t)((float)samples[i] * this->volume_);
+                }
+            }
+            else
+            {
+                // For other bit depths (like 8 or 24), just copy the data without scaling
+                memcpy(temp_buffer.data(), data, length);
+            }
+
+            // Write the modified (quieter) audio data to the I2S channel
             size_t bytes_written = 0;
-            esp_err_t err = i2s_channel_write(this->channel_, data, length, &bytes_written, portMAX_DELAY);
+            esp_err_t err = i2s_channel_write(this->channel_, temp_buffer.data(), length, &bytes_written, portMAX_DELAY);
 
             if (err != ESP_OK)
             {
@@ -135,13 +213,12 @@ namespace esphome
             }
 
             speaker::Speaker::status_clear_warning();
-            return bytes_written; // Return the actual number of bytes written
+            return bytes_written;
         }
 
         void I2SAudioSpeaker::write_()
         {
             // This is a placeholder for any periodic write operations
-            // For a speaker component, most writing will be driven by incoming data calls
         }
 
         void I2SAudioSpeaker::loop()
@@ -154,8 +231,6 @@ namespace esphome
                 this->start_();
                 break;
             case speaker::STATE_RUNNING:
-                // For speakers, most activity happens during write() calls
-                // But we could add any periodic tasks here
                 break;
             case speaker::STATE_STOPPING:
                 this->stop_();
