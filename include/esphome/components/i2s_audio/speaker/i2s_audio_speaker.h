@@ -6,6 +6,7 @@
 
 #include "esphome/components/speaker/speaker.h"
 #include "esphome/core/component.h"
+#include <driver/gpio.h>
 
 namespace esphome
 {
@@ -30,7 +31,12 @@ namespace esphome
             void set_sample_rate(uint32_t sample_rate) { this->sample_rate_ = sample_rate; }
             void set_bits_per_sample(i2s_data_bit_width_t bits_per_sample) { this->bits_per_sample_ = bits_per_sample; }
             void set_external_dac(bool external_dac) { this->external_dac_ = external_dac; }
-
+            void set_sd_pin(gpio_num_t pin)
+            {
+                this->sd_pin_ = pin;
+                this->sd_pin_set_ = true;
+            }
+            void set_volume(float volume);
             // Explicitly resolve ambiguous method calls by forwarding to the Speaker implementation
             bool is_failed() const { return speaker::Speaker::is_failed(); }
 
@@ -45,7 +51,9 @@ namespace esphome
             i2s_chan_handle_t channel_;
             uint32_t sample_rate_;
             i2s_data_bit_width_t bits_per_sample_;
-
+            gpio_num_t sd_pin_{GPIO_NUM_NC}; // default unused
+            bool sd_pin_set_{false};
+            float volume_{1.0f}; // Default to 100% volume
             HighFrequencyLoopRequester high_freq_;
         };
 
