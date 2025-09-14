@@ -4,39 +4,19 @@
 
 #include <driver/i2s_std.h>
 #include <esp_log.h>
-#include <vector>
+
 namespace esphome
 {
     namespace i2s_audio
     {
 
         static const char *const TAG = "i2s_audio.speaker";
-
-        // =========================================================================
-        // NEW METHOD: set_volume
-        // =========================================================================
-        void I2SAudioSpeaker::set_volume(float volume)
-        {
-            if (volume < 0.0f)
-            {
-                this->volume_ = 0.0f;
-            }
-            else if (volume > 1.0f)
-            {
-                this->volume_ = 1.0f;
-            }
-            else
-            {
-                this->volume_ = volume;
-            }
-            ESP_LOGD(TAG, "Speaker volume set to: %.2f", this->volume_);
-        }
-
+        constexpr size_t VOLUME_CHUNK_SAMPLES = 128;  // 2.67ms @ 48kHz (optimal stack size)
+        constexpr size_t VOLUME_CHUNK_BYTES = VOLUME_CHUNK_SAMPLES * sizeof(int16_t);
         void I2SAudioSpeaker::setup()
         {
             ESP_LOGI(TAG, "Setting up I2S Audio Speaker...");
         }
-
         void I2SAudioSpeaker::start()
         {
             if (speaker::Speaker::is_failed())
@@ -52,12 +32,12 @@ namespace esphome
             {
                 return; // Waiting for another i2s to return lock
             }
-            vTaskDelay(100);
-            if (this->sd_pin_set_)
-            {
+
+            if (this->sd_pin_ != GPIO_NUM_NC) {
                 gpio_reset_pin(this->sd_pin_);
-                gpio_set_direction(this->sd_pin_, GPIO_MODE_OUTPUT);
-                gpio_set_level(this->sd_pin_, 1); // Enable amp
+                gpio_set_direction(this->sd_pin_ , GPIO_MODE_OUTPUT);
+                gpio_set_level(this->sd_pin_, 1);
+
             }
             esp_err_t err;
             i2s_chan_handle_t channel;
@@ -69,7 +49,7 @@ namespace esphome
                 .clk_cfg = {
                     .sample_rate_hz = this->sample_rate_,
                     .clk_src = I2S_CLK_SRC_DEFAULT,
-                    .mclk_multiple = I2S_MCLK_MULTIPLE_384,
+                    .mclk_multiple = I2S_MCLK_MULTIPLE_1024, // CHANGED FROM 1024 TO 384
                 },
                 .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
                 .gpio_cfg = {
@@ -124,6 +104,10 @@ namespace esphome
             esp_err_t err;
 
             err = i2s_channel_disable(this->channel_);
+            // Disable amplifier BEFORE channel cleanup (critical!)
+            if (this->sd_pin_ != GPIO_NUM_NC) {
+                gpio_set_level(this->sd_pin_, 0);
+            }
             if (err != ESP_OK)
             {
                 ESP_LOGW(TAG, "Error disabling I2S speaker: %s", esp_err_to_name(err));
@@ -138,29 +122,23 @@ namespace esphome
                 speaker::Speaker::status_set_error();
                 return;
             }
-            if (this->sd_pin_set_)
-            {
-                gpio_set_level(this->sd_pin_, 0); // Disable amp
-            }
+
             this->unlock();
             this->state_ = speaker::STATE_STOPPED;
             this->high_freq_.stop();
             speaker::Speaker::status_clear_error();
         }
-
         size_t I2SAudioSpeaker::write(const uint8_t *data, size_t length)
         {
             if (this->state_ != speaker::STATE_RUNNING)
                 return 0;
 
-            // If volume is at 100% (or very close), write data directly to avoid processing
-            if (this->volume_ >= 0.99f)
-            {
+            // Full volume optimization - bypass processing
+            if (this->volume_ >= 0.99f) {
                 size_t bytes_written = 0;
                 esp_err_t err = i2s_channel_write(this->channel_, data, length, &bytes_written, portMAX_DELAY);
-                if (err != ESP_OK)
-                {
-                    ESP_LOGW(TAG, "Error writing to I2S speaker: %s", esp_err_to_name(err));
+                if (err != ESP_OK) {
+                    ESP_LOGW(TAG, "I2S write error: %s", esp_err_to_name(err));
                     speaker::Speaker::status_set_warning();
                     return 0;
                 }
@@ -168,57 +146,78 @@ namespace esphome
                 return bytes_written;
             }
 
-            // temporary buffer for volume-adjusted audio data
-            std::vector<uint8_t> temp_buffer(length);
+            // Volume processing with stack-based chunking
+            size_t total_written = 0;
+            size_t remaining = length;
+            const uint8_t *src = data;
+            int16_t chunk_buffer[VOLUME_CHUNK_SAMPLES];  // Fixed stack allocation (256 bytes)
 
-            // volume scaling based on the bits per sample
-            if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_16BIT)
-            {
-                int16_t *samples = (int16_t *)data;
-                int16_t *temp_samples = (int16_t *)temp_buffer.data();
-                size_t num_samples = length / 2;
-                for (size_t i = 0; i < num_samples; i++)
-                {
-                    temp_samples[i] = (int16_t)((float)samples[i] * this->volume_);
+            while (remaining > 0) {
+                // Determine chunk size (even byte count for 16-bit samples)
+                size_t chunk_size = (remaining < VOLUME_CHUNK_BYTES) ? 
+                                    (remaining & ~1) : VOLUME_CHUNK_BYTES;
+                if (chunk_size == 0) break;  // Ensure even byte count
+
+                size_t num_samples = chunk_size / sizeof(int16_t);
+                size_t bytes_written = 0;
+
+                if (this->volume_ <= 0.0f) {
+                    // Mute optimization - write zeros directly
+                    memset(chunk_buffer, 0, chunk_size);
+                    esp_err_t err = i2s_channel_write(this->channel_, 
+                                                     (uint8_t*)chunk_buffer, 
+                                                     chunk_size, 
+                                                     &bytes_written, 
+                                                     portMAX_DELAY);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "Zero write error: %s", esp_err_to_name(err));
+                        break;
+                    }
+                } else {
+                    // Volume scaling with in-place processing
+                    memcpy(chunk_buffer, src, chunk_size);
+                    
+                    // Fast integer volume scaling (avoids float per-sample)
+                    int32_t scaled_volume = static_cast<int32_t>(this->volume_ * 32768.0f);
+                    
+                    for (size_t i = 0; i < num_samples; i++) {
+                        int32_t sample = static_cast<int32_t>(chunk_buffer[i]) * scaled_volume;
+                        sample = (sample + 16384) >> 15;  // Rounding shift
+                        chunk_buffer[i] = (sample > 32767) ? 32767 : 
+                                         ((sample < -32768) ? -32768 : static_cast<int16_t>(sample));
+                    }
+
+                    esp_err_t err = i2s_channel_write(this->channel_, 
+                                                     (uint8_t*)chunk_buffer, 
+                                                     chunk_size, 
+                                                     &bytes_written, 
+                                                     portMAX_DELAY);
+                    if (err != ESP_OK) {
+                        ESP_LOGW(TAG, "Scaled write error: %s", esp_err_to_name(err));
+                        break;
+                    }
                 }
-            }
-            else if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT)
-            {
-                int32_t *samples = (int32_t *)data;
-                int32_t *temp_samples = (int32_t *)temp_buffer.data();
-                size_t num_samples = length / 4;
-                for (size_t i = 0; i < num_samples; i++)
-                {
-                    // Note: This simple multiplication works for 32-bit samples but assumes
-                    // the audio isn't already at the absolute max amplitude, where clipping could occur.
-                    // For voice, this is generally safe.
-                    temp_samples[i] = (int32_t)((float)samples[i] * this->volume_);
-                }
-            }
-            else
-            {
-                // For other bit depths (like 8 or 24), just copy the data without scaling
-                memcpy(temp_buffer.data(), data, length);
+
+                total_written += bytes_written;
+                src += bytes_written;
+                remaining -= bytes_written;
+
+                // Exit if partial write occurred
+                if (bytes_written < chunk_size) break;
             }
 
-            // Write the modified (quieter) audio data to the I2S channel
-            size_t bytes_written = 0;
-            esp_err_t err = i2s_channel_write(this->channel_, temp_buffer.data(), length, &bytes_written, portMAX_DELAY);
-
-            if (err != ESP_OK)
-            {
-                ESP_LOGW(TAG, "Error writing to I2S speaker: %s", esp_err_to_name(err));
+            if (total_written > 0) {
+                speaker::Speaker::status_clear_warning();
+            } else {
                 speaker::Speaker::status_set_warning();
-                return 0;
             }
-
-            speaker::Speaker::status_clear_warning();
-            return bytes_written;
+            return total_written;
         }
 
         void I2SAudioSpeaker::write_()
         {
             // This is a placeholder for any periodic write operations
+            // For a speaker component, most writing will be driven by incoming data calls
         }
 
         void I2SAudioSpeaker::loop()
@@ -231,6 +230,8 @@ namespace esphome
                 this->start_();
                 break;
             case speaker::STATE_RUNNING:
+                // For speakers, most activity happens during write() calls
+                // But we could add any periodic tasks here
                 break;
             case speaker::STATE_STOPPING:
                 this->stop_();
