@@ -9,260 +9,208 @@
 #endif
 #include <esp_log.h>
 
-namespace esphome
-{
-  namespace i2s_audio
-  {
+namespace esphome {
+namespace i2s_audio {
 
-    static const size_t BUFFER_SIZE = 512;
+static const size_t BUFFER_SIZE = 512;
+static const char *const TAG = "i2s_audio.microphone";
 
-    static const char *const TAG = "i2s_audio.microphone";
+void I2SAudioMicrophone::setup() {
+  if (this->primitives_allocated_) return;
 
-    void I2SAudioMicrophone::setup()
-    {
-      ESP_LOGI(TAG, "Setting up I2S Audio Microphone...");
+  this->callback_mutex_ = xSemaphoreCreateMutex();
+  this->control_events_ = xEventGroupCreate();
+  if (!this->callback_mutex_ || !this->control_events_) {
+    ESP_LOGE(TAG, "Failed to create sync primitives");
+    this->mark_failed();
+    return;
+  }
+  this->primitives_allocated_ = true;
+}
+
+void I2SAudioMicrophone::start() {
+  ESP_LOGW(TAG, "Manual start called on microphone; prefer using subscriptions for automatic management.");
+  this->internal_start();
+}
+
+void I2SAudioMicrophone::stop() {
+  ESP_LOGW(TAG, "Manual stop called on microphone; prefer using subscriptions for automatic management.");
+  this->internal_stop();
+}
+
+size_t I2SAudioMicrophone::read(int16_t *buf, size_t len) {
+  ESP_LOGW(TAG, "read() called but deprecated; use data callbacks instead.");
+  return 0;
+}
+
+size_t I2SAudioMicrophone::subscribe(std::function<void(const int16_t *, size_t)> &&callback) {
+  if (!this->primitives_allocated_) {
+    ESP_LOGE(TAG, "Primitives not allocated; call setup() first");
+    return 0;
+  }
+  xSemaphoreTake(this->callback_mutex_, portMAX_DELAY);
+  size_t id = this->next_subscription_id_++;
+  this->data_callbacks_.push_back({id, std::move(callback)});
+  if (this->data_callbacks_.size() == 1 && !this->running_) {
+    this->internal_start();
+  }
+  xSemaphoreGive(this->callback_mutex_);
+  return id;
+}
+
+void I2SAudioMicrophone::unsubscribe(size_t subscription_id) {
+  xSemaphoreTake(this->callback_mutex_, portMAX_DELAY);
+  auto it = std::find_if(this->data_callbacks_.begin(), this->data_callbacks_.end(),
+                         [subscription_id](const Subscription &sub) { return sub.id == subscription_id; });
+  if (it != this->data_callbacks_.end()) {
+    this->data_callbacks_.erase(it);
+    if (this->data_callbacks_.empty() && this->running_) {
+      this->internal_stop();
+    }
+  }
+  xSemaphoreGive(this->callback_mutex_);
+}
+
+void I2SAudioMicrophone::internal_start() {
+  if (this->is_failed()) return;
+  if (this->running_) return;
+
+  if (this->din_pin_ == I2S_GPIO_UNUSED) {
+    ESP_LOGE(TAG, "DIN pin not set");
+    this->mark_failed();
+    return;
+  }
 #if SOC_I2S_SUPPORTS_ADC
-      if (this->adc_)
-      {
-        if (this->parent_->get_port() != I2S_NUM_0)
-        {
-          ESP_LOGE(TAG, "Internal ADC only works on I2S0!");
-          this->mark_failed();
-          return;
-        }
-      }
-      else
+  if (this->adc_) {
+    if (this->parent_->get_port() != I2S_NUM_0) {
+      ESP_LOGE(TAG, "Internal ADC only works on I2S0!");
+      this->mark_failed();
+      return;
+    }
+  }
 #endif
-    }
 
-    void I2SAudioMicrophone::start()
-    {
-      if (this->is_failed())
-        return;
-      if (this->state_ == microphone::STATE_RUNNING)
-        return; // Already running
-      this->state_ = microphone::STATE_STARTING;
-      this->start_();
-    }
+  this->has_error_ = false;
 
-    void I2SAudioMicrophone::start_()
-    {
-      if (!this->try_lock())
-      {
-        return; // Waiting for another i2s to return lock
-      }
+  esp_err_t err;
+  ESP_ERROR_CHECK(i2s_new_channel(&this->channel_config_, NULL, &this->channel_));
+  i2s_std_config_t rx_std_cfg = {
+      .clk_cfg = {
+          .sample_rate_hz = this->sample_rate_,
+          .clk_src = I2S_CLK_SRC_DEFAULT,
+          .mclk_multiple = I2S_MCLK_MULTIPLE_1024,
+      },
+      .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
+      .gpio_cfg = {
+          .mclk = this->mclk_pin_, 
+          .bclk = this->bclk_pin_,
+          .ws = this->lrclk_pin_,
+          .dout = I2S_GPIO_UNUSED,
+          .din = this->din_pin_,
+          .invert_flags = {
+              .mclk_inv = false,
+              .bclk_inv = false,
+              .ws_inv = false,
+          },
+      }};
+  rx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
+  err = i2s_channel_init_std_mode(this->channel_, &rx_std_cfg);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Error initializing I2S channel: %s", esp_err_to_name(err));
+    this->status_set_error();
+    this->has_error_ = true;
+    return;
+  }
+  err = i2s_channel_enable(this->channel_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Error enabling I2S channel: %s", esp_err_to_name(err));
+    this->status_set_error();
+    this->has_error_ = true;
+    return;
+  }
 
-      esp_err_t err;
-#if SOC_I2S_SUPPORTS_ADC
-      if (this->adc_)
-      {
-        config.mode = (i2s_mode_t)(config.mode | I2S_MODE_ADC_BUILT_IN);
-        err = i2s_driver_install(this->parent_->get_port(), &config, 0, nullptr);
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error installing I2S driver: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
+  this->running_ = true;
+  xTaskCreate(I2SAudioMicrophone::mic_reader_task, "mic_read", 4096, this, 18, &this->mic_task_handle_);
 
-        err = i2s_set_adc_mode(ADC_UNIT_1, this->adc_channel_);
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error setting ADC mode: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
-        err = i2s_adc_enable(this->parent_->get_port());
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error enabling ADC: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
-      }
-      else
-#endif
-      {
-        i2s_chan_handle_t channel;
+  this->state_ = microphone::STATE_RUNNING;
+  ESP_LOGI(TAG, "Microphone started");
+}
 
-        ESP_ERROR_CHECK(i2s_new_channel(&this->channel_config_, NULL, &channel));
-        this->channel_ = channel;
+void I2SAudioMicrophone::internal_stop() {
+  if (!this->running_) return;
 
-        i2s_std_config_t rx_std_cfg = {
-            .clk_cfg = {
-                .sample_rate_hz = this->sample_rate_,
-                .clk_src = I2S_CLK_SRC_DEFAULT,
-                .mclk_multiple = I2S_MCLK_MULTIPLE_1024,
-            },
-            .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(this->bits_per_sample_, I2S_SLOT_MODE_MONO),
-            .gpio_cfg = {
-                .mclk = this->mclk_pin_, // some codecs may require mclk signal, this example doesn't need it
-                .bclk = this->bclk_pin_,
-                .ws = this->lrclk_pin_,
-                .dout = I2S_GPIO_UNUSED,
-                .din = this->din_pin_,
-                .invert_flags = {
-                    .mclk_inv = false,
-                    .bclk_inv = false,
-                    .ws_inv = false,
-                },
-            }};
-        rx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
-        err = i2s_channel_init_std_mode(this->channel_, &rx_std_cfg);
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error installing I2S driver: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
+  this->running_ = false;
+  
+  esp_err_t err = i2s_channel_disable(this->channel_);
+  if (err != ESP_OK) {
+    ESP_LOGW(TAG, "Error disabling I2S channel: %s", esp_err_to_name(err));
+    this->status_set_error();
+    this->has_error_ = true;
+  }
 
-        err = i2s_channel_enable(this->channel_);
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error enabling I2S channel: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
-      }
-      this->state_ = microphone::STATE_RUNNING;
-      this->high_freq_.start();
-    }
+  xEventGroupWaitBits(this->control_events_, DONE_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
 
-    void I2SAudioMicrophone::stop()
-    {
-      if (this->state_ == microphone::STATE_STOPPED || this->is_failed())
-        return;
-      if (this->state_ == microphone::STATE_STARTING)
-      {
-        this->state_ = microphone::STATE_STOPPED;
-        return;
-      }
-      this->state_ = microphone::STATE_STOPPING;
-      this->stop_();
-    }
-
-    void I2SAudioMicrophone::stop_()
-    {
-      esp_err_t err;
-#if SOC_I2S_SUPPORTS_ADC
-      if (this->adc_)
-      {
-        err = i2s_adc_disable(this->parent_->get_port());
-        if (err != ESP_OK)
-        {
-          ESP_LOGW(TAG, "Error disabling ADC: %s", esp_err_to_name(err));
-          this->status_set_error();
-          return;
-        }
-      }
-#endif
-      err = i2s_channel_disable(this->channel_);
-      if (err != ESP_OK)
-      {
-        ESP_LOGW(TAG, "Error disabling I2S microphone: %s", esp_err_to_name(err));
-        this->status_set_error();
-        return;
-      }
+  if (this->channel_ != nullptr) {
       err = i2s_del_channel(this->channel_);
-      if (err != ESP_OK)
-      {
-        ESP_LOGW(TAG, "Error deleting I2S channel: %s", esp_err_to_name(err));
-        this->status_set_error();
-        return;
+      if (err != ESP_OK) {
+          ESP_LOGW(TAG, "Error deleting I2S channel: %s", esp_err_to_name(err));
+          this->status_set_error();
+          this->has_error_ = true;
       }
-      this->unlock();
-      this->state_ = microphone::STATE_STOPPED;
-      this->high_freq_.stop();
-      this->status_clear_error();
+      this->channel_ = nullptr;
+  }
+
+  this->state_ = microphone::STATE_STOPPED;
+  ESP_LOGI(TAG, "Microphone stopped");
+}
+
+void I2SAudioMicrophone::mic_reader_task(void *param) {
+  I2SAudioMicrophone *self = static_cast<I2SAudioMicrophone *>(param);
+  static uint8_t temp_buffer[1024];
+  static int16_t processed[512];
+
+  while (self->running_) {
+    size_t bytes_read = 0;
+    esp_err_t err = i2s_channel_read(self->channel_, temp_buffer, self->chunk_size_, &bytes_read, portMAX_DELAY);
+
+    if (err != ESP_OK || !self->running_) {
+      if (self->running_) {
+          ESP_LOGW(TAG, "I2S read error: %s", esp_err_to_name(err));
+          self->has_error_ = true;
+          self->status_set_error();
+      }
+      break;
+    }
+    if (bytes_read == 0) continue;
+
+    const int16_t *samples = nullptr;
+    size_t num_samples = 0;
+
+    if (self->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT) {
+      num_samples = bytes_read / sizeof(int32_t);
+      for (size_t i = 0; i < num_samples; i++) {
+        int32_t temp = reinterpret_cast<int32_t *>(temp_buffer)[i] >> 16;
+        processed[i] = clamp<int16_t>(temp, INT16_MIN, INT16_MAX);
+      }
+      samples = processed;
+    } else {
+      num_samples = bytes_read / sizeof(int16_t);
+      samples = reinterpret_cast<const int16_t *>(temp_buffer);
     }
 
-    size_t I2SAudioMicrophone::read(int16_t *buf, size_t len)
-    {
-      // ESP_LOGI(TAG, "ENTER %s called by %s on core %d (addr=%p)",
-      //    __FUNCTION__, pcTaskGetName(NULL), xPortGetCoreID(), __builtin_return_address(0));
-      size_t bytes_read = 0;
-      esp_err_t err = i2s_channel_read(this->channel_, buf, len, &bytes_read, (1000 / portTICK_PERIOD_MS));
-      if (err != ESP_OK)
-      {
-        ESP_LOGW(TAG, "Error reading from I2S microphone: %s", esp_err_to_name(err));
-        this->status_set_warning();
-        return 0;
+    if (num_samples > 0) {
+      xSemaphoreTake(self->callback_mutex_, portMAX_DELAY);
+      for (const auto &sub : self->data_callbacks_) {
+        sub.callback(samples, num_samples);
       }
-      if (bytes_read == 0)
-      {
-        this->status_set_warning();
-        return 0;
-      }
-      this->status_clear_warning();
-      
-      if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_16BIT)
-      {
-        return bytes_read;
-      }
-      else if (this->bits_per_sample_ == I2S_DATA_BIT_WIDTH_32BIT)
-      {
-        // Use static buffer instead of local vector
-        static std::vector<int16_t> samples;  // ← Static vector, allocated once
-        size_t samples_read = bytes_read / sizeof(int32_t);
-        samples.resize(samples_read);
-        
-        for (size_t i = 0; i < samples_read; i++)
-        {
-          int32_t temp = reinterpret_cast<int32_t *>(buf)[i] >> 11;
-          samples[i] = clamp<int16_t>(temp, INT16_MIN, INT16_MAX);
-        }
-        memcpy(buf, samples.data(), samples_read * sizeof(int16_t));
-        return samples_read * sizeof(int16_t);
-      }
-      else
-      {
-        ESP_LOGE(TAG, "Unsupported bits per sample: %d", this->bits_per_sample_);
-        return 0;
-      }
+      xSemaphoreGive(self->callback_mutex_);
     }
+  }
+  xEventGroupSetBits(self->control_events_, DONE_EVENT);
+  vTaskDelete(NULL);
+}
 
-    void I2SAudioMicrophone::read_()
-    {
-      ESP_LOGI(TAG, "ENTER %s called by %s on core %d (addr=%p)",
-         __FUNCTION__, pcTaskGetName(NULL), xPortGetCoreID(), __builtin_return_address(0));
-      static std::vector<int16_t> samples;
-      samples.resize(BUFFER_SIZE);
-      size_t bytes_read = this->read(samples.data(), BUFFER_SIZE * sizeof(int16_t));
-      
-      if (bytes_read > 0) {
-        samples.resize(bytes_read / sizeof(int16_t));
-        this->data_callbacks_.call(samples);
-      }
-      
-      // Critical: Add yield to prevent watchdog timeout
-      vTaskDelay(1); // This is essential!
-    }
+}  // namespace i2s_audio
+}  // namespace esphome
 
-
-    void I2SAudioMicrophone::loop()
-    {
-      ESP_LOGI(TAG, "ENTER %s called by %s on core %d (addr=%p)",
-         __FUNCTION__, pcTaskGetName(NULL), xPortGetCoreID(), __builtin_return_address(0));
-      switch (this->state_)
-      {
-      case microphone::STATE_STOPPED:
-        break;
-      case microphone::STATE_STARTING:
-        this->start_();
-        break;
-      case microphone::STATE_RUNNING:
-        if (this->data_callbacks_.size() > 0)
-        {
-          this->read_();
-        }
-        break;
-      case microphone::STATE_STOPPING:
-        this->stop_();
-        break;
-      }
-    }
-
-  } // namespace i2s_audio
-} // namespace esphome
-
-#endif // USE_ESP32
+#endif  // USE_ESP32
