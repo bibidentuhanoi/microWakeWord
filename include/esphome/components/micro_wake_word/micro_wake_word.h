@@ -5,6 +5,7 @@
 #include <freertos/FreeRTOS.h>
 #include <freertos/task.h>
 #include <freertos/semphr.h>
+#include <freertos/event_groups.h>
 
 #include <frontend_util.h>
 #include <tensorflow/lite/core/c/common.h>
@@ -22,14 +23,18 @@ namespace esphome
   namespace micro_wake_word
   {
 
-    enum State
-    {
-      IDLE,
-      DETECTING_WAKE_WORD,
-    };
-
     // The number of audio slices to process before accepting a positive detection
     static const uint8_t MIN_SLICES_BEFORE_DETECTION = 74;
+
+    enum state_t : uint8_t {
+      STOPPED = 0,
+      RUNNING,
+      IDLE,  // Used for paused state
+      ERROR,
+    };
+
+    inline bool is_running(state_t s) { return s == state_t::RUNNING; }
+    inline bool has_failed(state_t s) { return s == state_t::ERROR; }
 
     class MicroWakeWord : public Component
     {
@@ -46,8 +51,8 @@ namespace esphome
       void pause();
       void resume();
 
-      bool is_running() const { return this->state_ != State::IDLE; }
-      bool has_error() const { return this->has_error_; }
+      bool is_running() const { return micro_wake_word::is_running(this->state_); }
+      bool has_error() const { return micro_wake_word::has_failed(this->state_); }
 
       void set_features_step_size(uint8_t step_size)
       {
@@ -76,9 +81,10 @@ namespace esphome
 
     protected:
       microphone::Microphone *microphone_{nullptr};
-      State state_{State::IDLE};
+      state_t state_{state_t::RUNNING};
       
       TaskHandle_t processing_task_handle_{nullptr};
+      EventGroupHandle_t task_events_{nullptr};
       static void processing_task_wrapper(void *param);
       void processing_task();
 
@@ -103,10 +109,7 @@ namespace esphome
       std::string detected_wake_word_{""};
       CallbackManager<void(std::string)> detection_callbacks_{};
 
-      volatile bool has_error_{false};
-      volatile bool is_paused_{false}; // <-- FIX: Added pause state flag
-
-      void set_state_(State state);
+      void set_state_(state_t state);
 
       bool has_enough_samples_();
       bool allocate_buffers_();

@@ -220,12 +220,7 @@ namespace esphome
             // Delegate to new write API for consistency
             return this->write(nullptr, 0, true) > 0;
         }
-
-        void I2SAudioSpeaker::loop()
-        {
-            // No-op, all logic is in the background task now
-        }
-
+        
         void I2SAudioSpeaker::speaker_task(void *param)
         {
             auto *instance = static_cast<I2SAudioSpeaker *>(param);

@@ -26,14 +26,8 @@ namespace esphome
             void setup() override;
             void start() override;
             void stop() override;
-
-            void loop() override;
-            // New API: Overload with optional finish flag (default false) for file/stream-end scenarios
-            // If length==0 && finish=true, skips write and triggers finish() logic internally
             size_t write(const uint8_t *data, size_t length, bool finish = false);
-
-            // Retained for explicit use (e.g., after manual buffer fill)
-
+            
             // Configuration setters
             void set_dout_pin(gpio_num_t pin) { this->dout_pin_ = pin; }
             void set_sd_pin(gpio_num_t pin) { this->sd_pin_ = pin; }

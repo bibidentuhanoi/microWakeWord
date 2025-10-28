@@ -24,22 +24,11 @@ namespace esphome
     static const size_t BUFFER_LENGTH = 64;
     static const size_t BUFFER_SIZE = SAMPLE_RATE_HZ / 1000 * BUFFER_LENGTH;
 
+#define TASK_DONE_BIT BIT0
+
     float MicroWakeWord::get_setup_priority() const
     {
       return setup_priority::AFTER_CONNECTION;
-    }
-
-    static const char *micro_wake_word_state_to_string(State state)
-    {
-      switch (state)
-      {
-      case State::IDLE:
-        return "IDLE";
-      case State::DETECTING_WAKE_WORD:
-        return "DETECTING_WAKE_WORD";
-      default:
-        return "UNKNOWN";
-      }
     }
 
     void MicroWakeWord::dump_config()
@@ -62,7 +51,7 @@ namespace esphome
       if (!this->register_streaming_ops_(this->streaming_op_resolver_))
       {
         this->mark_failed();
-        this->has_error_ = true;
+        this->state_ = state_t::ERROR;
         return;
       }
 
@@ -83,6 +72,59 @@ namespace esphome
       this->frontend_config_.pcan_gain_control.gain_bits = 21;
       this->frontend_config_.log_scale.enable_log = 1;
       this->frontend_config_.log_scale.scale_shift = 6;
+
+      // Start detecting immediately
+      if (!this->load_models_() || !this->allocate_buffers_()) {
+        this->state_ = state_t::ERROR;
+        return;
+      }
+
+      this->mic_subscription_id_ = static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->subscribe(
+          [this](const int16_t *data, size_t num_samples) { this->on_audio_received(data, num_samples); });
+
+      this->data_sem_ = xSemaphoreCreateBinary();
+
+      this->task_events_ = xEventGroupCreate();
+
+      xTaskCreate(this->processing_task_wrapper, "ww_process", 4096, this, 5, &this->processing_task_handle_);
+
+      this->set_state_(state_t::RUNNING);
+    }
+
+    void MicroWakeWord::start() {
+      // Since it starts automatically, start() can be a no-op or resume if paused/stopped
+      if (this->state_ == state_t::STOPPED || this->state_ == state_t::IDLE) {
+        this->resume();
+      }
+    }
+
+    void MicroWakeWord::stop() {
+      this->set_state_(state_t::STOPPED);
+
+      if (this->processing_task_handle_) {
+        xEventGroupWaitBits(this->task_events_, TASK_DONE_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(500));
+        vEventGroupDelete(this->task_events_);
+        this->task_events_ = nullptr;
+        this->processing_task_handle_ = nullptr;
+      }
+
+      static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->unsubscribe(this->mic_subscription_id_);
+
+      this->unload_models_();
+      this->deallocate_buffers_();
+
+      if (this->data_sem_) {
+        vSemaphoreDelete(this->data_sem_);
+        this->data_sem_ = nullptr;
+      }
+    }
+
+    void MicroWakeWord::pause() {
+      this->set_state_(state_t::IDLE);
+    }
+
+    void MicroWakeWord::resume() {
+      this->set_state_(state_t::RUNNING);
     }
 
     void MicroWakeWord::add_wake_word_model(const uint8_t *model_start,
@@ -112,26 +154,26 @@ namespace esphome
     }
 
     void MicroWakeWord::processing_task() {
-      while (this->state_ == State::DETECTING_WAKE_WORD) {
+      while (this->state_ != state_t::STOPPED) {
         
-        ESP_LOGI(TAG, "Processing task: beginning detection loop.");
+        ESP_LOGD(TAG, "Processing task: beginning detection loop.");
 
-        while (this->state_ == State::DETECTING_WAKE_WORD && !this->has_error_) {
+        while (micro_wake_word::is_running(this->state_)) {
           
           while (!this->has_enough_samples_()) {
             if (xSemaphoreTake(this->data_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
               if (static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->has_error()) {
-                ESP_LOGE(TAG, "Microphone error detected; setting has_error_");
-                this->has_error_ = true;
+                ESP_LOGE(TAG, "Microphone error detected; setting state to ERROR");
+                this->set_state_(state_t::ERROR);
                 break;
               }
               continue;
             }
           }
-          if (this->has_error_) break;
+          if (this->state_ == state_t::ERROR) break;
           
           this->update_model_probabilities_();
-          if (this->has_error_) {
+          if (this->state_ == state_t::ERROR) {
             ESP_LOGE(TAG, "Error during model probability update.");
             break; 
           }
@@ -146,7 +188,7 @@ namespace esphome
           }
         }
         
-        if (this->has_error_) {
+        if (this->state_ == state_t::ERROR) {
           ESP_LOGE(TAG, "Error detected in processing task. Initiating recovery...");
           this->unload_models_();
           this->deallocate_buffers_();
@@ -155,182 +197,52 @@ namespace esphome
           
           if (this->load_models_() && this->allocate_buffers_()) {
             this->reset_states_();
-            this->has_error_ = false;
+            this->set_state_(state_t::RUNNING);
             this->status_clear_error();
             ESP_LOGI(TAG, "Recovery successful, resuming wake word detection.");
           } else {
             ESP_LOGE(TAG, "Recovery failed. Retrying in 2 seconds...");
             vTaskDelay(pdMS_TO_TICKS(2000));
           }
+        } else if (this->state_ == state_t::IDLE) {
+          vTaskDelay(pdMS_TO_TICKS(100));  // Prevent busy loop during pause
         }
       }
       
-      ESP_LOGI(TAG, "Processing task exiting (state changed to IDLE).");
+      ESP_LOGI(TAG, "Processing task exiting (state changed to STOPPED).");
+      xEventGroupSetBits(this->task_events_, TASK_DONE_BIT);
       this->processing_task_handle_ = nullptr;
       vTaskDelete(NULL);
     }
 
-    void MicroWakeWord::start()
-    {
-      if (this->is_failed()) {
-        ESP_LOGW(TAG, "Wake word component is marked as failed. Please check setup logs");
-        this->has_error_ = true;
-        return;
-      }
-
-      this->has_error_ = false;
-      this->is_paused_ = false; // Ensure not paused on start
-
-      if (this->state_ != State::IDLE) {
-        ESP_LOGW(TAG, "Wake word is already running");
-        return;
-      }
-      
-      if (!this->load_models_() || !this->allocate_buffers_()) {
-        ESP_LOGE(TAG, "Failed to load the wake word model(s) or allocate buffers");
-        this->status_set_error();
-        this->has_error_ = true;
-        this->stop();
-        return;
-      }
-      
-      this->reset_states_();
-      this->set_state_(State::DETECTING_WAKE_WORD);
-      
-      this->data_sem_ = xSemaphoreCreateCounting(100, 0);
-      if (this->data_sem_ == nullptr) {
-        ESP_LOGE(TAG, "Failed to create data semaphore");
-        this->has_error_ = true;
-        this->stop();
-        return;
-      }
-      
-      auto callback = [this](const int16_t *data, size_t num_samples) {
-        this->on_audio_received(data, num_samples);
-      };
-      this->mic_subscription_id_ = static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->subscribe(std::move(callback));
-      
-      xTaskCreate(
-          MicroWakeWord::processing_task_wrapper,
-          "ww_processing_task", 
-          16384,                   
-          this,                   
-          12,
-          &this->processing_task_handle_);
-    }
-
-    void MicroWakeWord::stop()
-    {
-      if (this->state_ == State::IDLE) {
-        return;
-      }
-      this->set_state_(State::IDLE);
-
-      if (this->processing_task_handle_ != nullptr) {
-        vTaskDelay(pdMS_TO_TICKS(20));
-      }
-      
-      if (this->mic_subscription_id_ != 0) {
-        static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->unsubscribe(this->mic_subscription_id_);
-        this->mic_subscription_id_ = 0;
-      }
-      
-      if (this->data_sem_ != nullptr) {
-        vSemaphoreDelete(this->data_sem_);
-        this->data_sem_ = nullptr;
-      }
-      
-      this->unload_models_();
-      this->deallocate_buffers_();
-    }
-
-    void MicroWakeWord::reset()
-    {
-      if (this->state_ != State::DETECTING_WAKE_WORD) {
-        ESP_LOGW(TAG, "Reset called but not in detecting state");
-        return;
-      }
-      this->reset_states_();
-      ESP_LOGD(TAG, "Wake word state reset");
-    }
-
-    // --- START: MODIFIED FUNCTIONS ---
-
-    void MicroWakeWord::pause() {
-      if (this->state_ != State::DETECTING_WAKE_WORD) return;
-      this->is_paused_ = true;
-      this->ring_buffer_->reset(); // Immediately clear any pending audio data.
-      ESP_LOGD(TAG, "Wake word detection paused (processing suspended).");
-    }
-
-    void MicroWakeWord::resume() {
-      if (this->state_ != State::DETECTING_WAKE_WORD) return;
-      this->is_paused_ = false;
-      
-      // CRITICAL: Reset the model's internal state. It has missed audio
-      // history and is now out of sync. This prepares it for a fresh detection.
-      this->reset_states_(); 
-      
-      ESP_LOGD(TAG, "Wake word detection resumed (processing enabled).");
+    void MicroWakeWord::set_state_(state_t state) {
+      this->state_ = state;
     }
 
     void MicroWakeWord::on_audio_received(const int16_t *data, size_t num_samples) {
-      // FIX: Add a gate to prevent processing/writing to the buffer when paused.
-      if (this->has_error_ || this->state_ != State::DETECTING_WAKE_WORD || this->is_paused_) {
-        return;
+      // Assuming ring_buffer_ is allocated in allocate_buffers_
+      size_t bytes_written = this->ring_buffer_->write((void *)data, num_samples * sizeof(int16_t));
+      if (bytes_written < num_samples * sizeof(int16_t)) {
+        ESP_LOGW(TAG, "Ring buffer overflow");
       }
-
-      size_t bytes_to_write = num_samples * sizeof(int16_t);
-      size_t bytes_free = this->ring_buffer_->free();
-
-      if (bytes_free < bytes_to_write) {
-        ESP_LOGW(TAG, "Ring buffer overrun. Resetting buffer.");
-        this->ring_buffer_->reset();
-        return;
-      }
-
-      size_t bytes_written = this->ring_buffer_->write((void *)data, bytes_to_write);
-      if (bytes_written > 0) {
-        xSemaphoreGive(this->data_sem_);
-      }
-    }
-    
-    // --- END: MODIFIED FUNCTIONS ---
-
-    void MicroWakeWord::set_state_(State state)
-    {
-      ESP_LOGD(TAG, "State changed from %s to %s",
-               micro_wake_word_state_to_string(this->state_),
-               micro_wake_word_state_to_string(state));
-      this->state_ = state;
+      xSemaphoreGive(this->data_sem_);
     }
 
     bool MicroWakeWord::allocate_buffers_()
     {
-      ExternalRAMAllocator<int16_t> audio_samples_allocator(
-          ExternalRAMAllocator<int16_t>::ALLOW_FAILURE);
-
-      if (this->preprocessor_audio_buffer_ == nullptr)
-      {
-        this->preprocessor_audio_buffer_ =
-            audio_samples_allocator.allocate(this->new_samples_to_get_());
-        if (this->preprocessor_audio_buffer_ == nullptr)
-        {
-          ESP_LOGE(TAG, "Could not allocate the audio preprocessor's buffer.");
-          this->has_error_ = true;
-          return false;
-        }
+      this->ring_buffer_ = RingBuffer::create(BUFFER_SIZE * sizeof(int16_t));
+      if (!this->ring_buffer_) {
+        ESP_LOGE(TAG, "Failed to allocate ring buffer");
+        this->set_state_(state_t::ERROR);
+        return false;
       }
 
-      if (this->ring_buffer_ == nullptr)
-      {
-        this->ring_buffer_ = RingBuffer::create(BUFFER_SIZE * sizeof(int16_t));
-        if (this->ring_buffer_ == nullptr)
-        {
-          ESP_LOGE(TAG, "Could not allocate ring buffer");
-          this->has_error_ = true;
-          return false;
-        }
+      ExternalRAMAllocator<int16_t> audio_samples_allocator(ExternalRAMAllocator<int16_t>::ALLOW_FAILURE);
+      this->preprocessor_audio_buffer_ = audio_samples_allocator.allocate(this->new_samples_to_get_());
+      if (!this->preprocessor_audio_buffer_) {
+        ESP_LOGE(TAG, "Failed to allocate preprocessor audio buffer");
+        this->set_state_(state_t::ERROR);
+        return false;
       }
 
       return true;
@@ -338,8 +250,9 @@ namespace esphome
 
     void MicroWakeWord::deallocate_buffers_()
     {
-      ExternalRAMAllocator<int16_t> audio_samples_allocator(
-          ExternalRAMAllocator<int16_t>::ALLOW_FAILURE);
+      this->ring_buffer_.reset();
+
+      ExternalRAMAllocator<int16_t> audio_samples_allocator(ExternalRAMAllocator<int16_t>::ALLOW_FAILURE);
       audio_samples_allocator.deallocate(this->preprocessor_audio_buffer_,
                                          this->new_samples_to_get_());
       this->preprocessor_audio_buffer_ = nullptr;
@@ -352,7 +265,7 @@ namespace esphome
       {
         ESP_LOGD(TAG, "Failed to populate frontend state");
         FrontendFreeStateContents(&this->frontend_state_);
-        this->has_error_ = true;
+        this->set_state_(state_t::ERROR);
         return false;
       }
 
@@ -361,7 +274,7 @@ namespace esphome
         if (!model.load_model(this->streaming_op_resolver_))
         {
           ESP_LOGE(TAG, "Failed to initialize a wake word model %s.", model.get_wake_word().c_str());
-          this->has_error_ = true;
+          this->set_state_(state_t::ERROR);
           return false;
         }
       }
@@ -369,7 +282,7 @@ namespace esphome
       if (!this->vad_model_->load_model(this->streaming_op_resolver_))
       {
         ESP_LOGE(TAG, "Failed to initialize VAD model.");
-        this->has_error_ = true;
+        this->set_state_(state_t::ERROR);
         return false;
       }
 #endif
@@ -467,7 +380,7 @@ namespace esphome
       if (bytes_read == 0)
       {
         ESP_LOGE(TAG, "Could not read data from Ring Buffer");
-        this->has_error_ = true;
+        this->set_state_(state_t::ERROR);
       }
       else if (bytes_read < this->new_samples_to_get_() * sizeof(int16_t))
       {
@@ -515,6 +428,10 @@ namespace esphome
 #ifdef USE_MICRO_WAKE_WORD_VAD
       this->vad_model_->reset_probabilities();
 #endif
+    }
+
+    void MicroWakeWord::reset() {
+      this->reset_states_();
     }
 
     bool MicroWakeWord::register_streaming_ops_(
