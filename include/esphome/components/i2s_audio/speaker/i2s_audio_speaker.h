@@ -1,3 +1,5 @@
+// Updated i2s_audio_speaker.h
+// i2s_audio_speaker.h
 #pragma once
 
 #ifdef USE_ESP32
@@ -18,13 +20,6 @@ namespace esphome
     namespace i2s_audio
     {
 
-        enum SpeakerState
-        {
-            STATE_IDLE,
-            STATE_PLAYING,
-            STATE_STOPPING
-        };
-
         class I2SAudioSpeaker : public I2SAudioComponent, public speaker::Speaker
         {
         public:
@@ -33,12 +28,11 @@ namespace esphome
             void stop() override;
 
             void loop() override;
+            // New API: Overload with optional finish flag (default false) for file/stream-end scenarios
+            // If length==0 && finish=true, skips write and triggers finish() logic internally
+            size_t write(const uint8_t *data, size_t length, bool finish = false);
 
-            size_t write(const uint8_t *data, size_t length) override;
-
-            // New public API
-            bool finish();
-            void interrupt();
+            // Retained for explicit use (e.g., after manual buffer fill)
 
             // Configuration setters
             void set_dout_pin(gpio_num_t pin) { this->dout_pin_ = pin; }
@@ -61,6 +55,8 @@ namespace esphome
 
         protected:
             static void speaker_task(void *param);
+            bool finish();
+            void interrupt();
 
             // Existing configuration
             gpio_num_t dout_pin_{I2S_GPIO_UNUSED};
@@ -79,9 +75,10 @@ namespace esphome
             SemaphoreHandle_t completion_semaphore_{nullptr};
             SemaphoreHandle_t buffer_mutex_{nullptr};
             SemaphoreHandle_t shutdown_semaphore_{nullptr};
-            volatile SpeakerState state_{STATE_IDLE};
             volatile bool interrupted_{false};
             uint32_t last_write_timestamp_{0};
+            // For auto-interrupt: Track last writing task
+            TaskHandle_t last_task_handle_{nullptr};
         };
 
     } // namespace i2s_audio

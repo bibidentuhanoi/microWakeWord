@@ -1,3 +1,4 @@
+// Updated i2s_audio_microphone.h (minimal change: no functional changes, just inherits the updated enum)
 #pragma once
 
 #ifdef USE_ESP32
