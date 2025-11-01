@@ -7,8 +7,6 @@
 #include "../i2s_audio.h"
 #include "driver/gpio.h"
 
-#include "esphome/components/speaker/speaker.h"
-#include "esphome/core/component.h"
 #include "esphome/core/ring_buffer.h"
 
 #include "freertos/FreeRTOS.h"
@@ -20,10 +18,10 @@ namespace esphome
     namespace i2s_audio
     {
 
-        class I2SAudioSpeaker : public I2SAudioComponent, public speaker::Speaker
+        class I2SAudioSpeaker : public I2SAudioComponent
         {
         public:
-            void setup() override;
+            void setup();
             void start() override;
             void stop() override;
             size_t write(const uint8_t *data, size_t length, bool finish = false);
@@ -44,8 +42,6 @@ namespace esphome
                 this->volume_ = volume;
             }
             void set_buffer_size(size_t buffer_size) { this->buffer_size_ = buffer_size; }
-            
-            bool is_failed() const { return speaker::Speaker::is_failed(); }
 
         protected:
             static void speaker_task(void *param);

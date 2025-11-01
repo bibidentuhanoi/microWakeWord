@@ -3,17 +3,33 @@
 #ifdef USE_ESP32
 
 #include <driver/i2s_std.h>
-#include "esphome/core/component.h"
 #include "esphome/core/helpers.h"
 
 namespace esphome
 {
   namespace i2s_audio
   {
-    class I2SAudioComponent : public Component
+    enum State {
+      STOPPED = 0,
+      STARTING,
+      RUNNING,
+      STOPPING,
+      IDLE, 
+      ERROR,
+    };
+
+    class I2SAudioComponent
     {
     public:
-      void setup() override;
+      virtual ~I2SAudioComponent() = default;
+      void setup();
+      virtual void start() = 0;
+      virtual void stop() = 0;
+      
+      State get_state() const { return this->state_; }
+      bool is_running() const { return this->state_ == RUNNING; }
+      bool is_stopped() const { return this->state_ == STOPPED; }
+      bool has_error() const { return this->state_ == ERROR; }
 
       i2s_std_gpio_config_t get_gpio_config() const
       {
@@ -42,6 +58,7 @@ namespace esphome
 
     protected:
       Mutex lock_;
+      State state_{STOPPED};
 
       gpio_num_t mclk_pin_{I2S_GPIO_UNUSED};
       gpio_num_t bclk_pin_{I2S_GPIO_UNUSED};
@@ -51,5 +68,8 @@ namespace esphome
 
   } // namespace i2s_audio
 } // namespace esphome
+
+#include "speaker/i2s_audio_speaker.h"
+#include "microphone/i2s_audio_microphone.h"
 
 #endif // USE_ESP32

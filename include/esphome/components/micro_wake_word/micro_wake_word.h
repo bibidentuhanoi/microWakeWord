@@ -12,8 +12,7 @@
 #include <tensorflow/lite/micro/micro_interpreter.h>
 #include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
 
-#include "esphome/components/microphone/microphone.h"
-#include "esphome/core/component.h"
+#include "esphome/components/i2s_audio/microphone/i2s_audio_microphone.h"
 #include "esphome/core/ring_buffer.h"
 #include "preprocessor_settings.h"
 #include "streaming_model.h"
@@ -36,11 +35,10 @@ namespace esphome
     inline bool is_running(state_t s) { return s == state_t::RUNNING; }
     inline bool has_failed(state_t s) { return s == state_t::ERROR; }
 
-    class MicroWakeWord : public Component
+    class MicroWakeWord
     {
     public:
-      void setup() override;
-      void loop() override {}
+      void setup();
       void start();
       void stop();
       void reset();
@@ -56,7 +54,7 @@ namespace esphome
         this->features_step_size_ = step_size;
       }
 
-      void set_microphone(microphone::Microphone *microphone)
+      void set_microphone(i2s_audio::I2SAudioMicrophone *microphone)
       {
         this->microphone_ = microphone;
       }
@@ -77,7 +75,7 @@ namespace esphome
 #endif
 
     protected:
-      microphone::Microphone *microphone_{nullptr};
+      i2s_audio::I2SAudioMicrophone *microphone_{nullptr};
       state_t state_{state_t::RUNNING};
       
       TaskHandle_t processing_task_handle_{nullptr};

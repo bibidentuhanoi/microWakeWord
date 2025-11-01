@@ -5,8 +5,6 @@
 
 #include "../i2s_audio.h"
 
-#include "esphome/components/microphone/microphone.h"
-#include "esphome/core/component.h"
 #include "esphome/core/helpers.h"      // For clamp, etc.
 
 #include <freertos/FreeRTOS.h>
@@ -20,17 +18,15 @@
 namespace esphome {
 namespace i2s_audio {
 
-class I2SAudioMicrophone : public I2SAudioComponent, public microphone::Microphone {
+class I2SAudioMicrophone : public I2SAudioComponent {
  public:
-  void setup() override;  // New: Allocate primitives here
+  void setup();
   void start() override;  // Logs warning; use subscriptions for auto-start
   void stop() override;   // Logs warning; use subscriptions for auto-stop
 
-  void loop() override {}  // Empty now; task handles looping
-
   void set_din_pin(gpio_num_t pin) { this->din_pin_ = pin; }
 
-  size_t read(int16_t *buf, size_t len) override;  // Deprecated; logs and returns 0
+  size_t read(int16_t *buf, size_t len);
 
 #if SOC_I2S_SUPPORTS_ADC
   void set_adc_channel(adc1_channel_t channel) {
@@ -42,8 +38,6 @@ class I2SAudioMicrophone : public I2SAudioComponent, public microphone::Micropho
   void set_channel(i2s_chan_config_t config) { this->channel_config_ = config; }
   void set_sample_rate(uint32_t sample_rate) { this->sample_rate_ = sample_rate; }
   void set_bits_per_sample(i2s_data_bit_width_t bits_per_sample) { this->bits_per_sample_ = bits_per_sample; }
-
-  bool has_error() const { return this->has_error_; }  // New public getter
 
   // New pub-sub interface
   size_t subscribe(std::function<void(const int16_t *, size_t)> &&callback);
@@ -68,7 +62,6 @@ class I2SAudioMicrophone : public I2SAudioComponent, public microphone::Micropho
   EventGroupHandle_t control_events_{nullptr};
   TaskHandle_t mic_task_handle_{nullptr};
   volatile bool running_{false};
-  volatile bool has_error_{false};  // Internal error flag
   bool primitives_allocated_{false};  // Track if sem/mutex/etc. allocated
   size_t chunk_size_{1024};  // Bytes read from I2S per iteration
 

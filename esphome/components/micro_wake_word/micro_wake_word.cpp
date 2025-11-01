@@ -60,7 +60,7 @@ namespace esphome
         return;
       }
 
-      this->mic_subscription_id_ = static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->subscribe(
+      this->mic_subscription_id_ = this->microphone_->subscribe(
           [this](const int16_t *data, size_t num_samples) { this->on_audio_received(data, num_samples); });
 
       this->data_sem_ = xSemaphoreCreateBinary();
@@ -89,7 +89,7 @@ namespace esphome
         this->processing_task_handle_ = nullptr;
       }
 
-      static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->unsubscribe(this->mic_subscription_id_);
+      this->microphone_->unsubscribe(this->mic_subscription_id_);
 
       this->unload_models_();
       this->deallocate_buffers_();
@@ -143,7 +143,7 @@ namespace esphome
           
           while (!this->has_enough_samples_()) {
             if (xSemaphoreTake(this->data_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
-              if (static_cast<i2s_audio::I2SAudioMicrophone*>(this->microphone_)->has_error()) {
+              if (this->microphone_->has_error()) {
                 ESP_LOGE(TAG, "Microphone error detected; setting state to ERROR");
                 this->set_state_(state_t::ERROR);
                 break;

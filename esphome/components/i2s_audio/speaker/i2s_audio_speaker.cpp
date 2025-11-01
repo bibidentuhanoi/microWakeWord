@@ -11,7 +11,6 @@ namespace esphome
 {
     namespace i2s_audio
     {
-        using esphome::speaker::state_t;  // ADD THIS LINE
         static const char *const TAG = "i2s_audio.speaker";
         constexpr size_t VOLUME_CHUNK_SAMPLES = 256;  // 2.67ms @ 48kHz (optimal stack size)
         constexpr size_t VOLUME_CHUNK_BYTES = VOLUME_CHUNK_SAMPLES * sizeof(int16_t);
@@ -23,7 +22,7 @@ namespace esphome
 
         void I2SAudioSpeaker::start()
         {
-            if (this->task_handle_ != nullptr || speaker::Speaker::is_failed())
+            if (this->task_handle_ != nullptr || this->has_error())
             {
                 return; // Already running or in a failed state
             }
@@ -34,7 +33,7 @@ namespace esphome
             if (!this->buffer_)
             {
                 ESP_LOGE(TAG, "Failed to create ring buffer");
-                speaker::Speaker::status_set_error();
+                this->state_ = ERROR;
                 return;
             }
 
@@ -43,7 +42,7 @@ namespace esphome
             {
                 ESP_LOGE(TAG, "Failed to create completion semaphore");
                 this->buffer_.reset();
-                speaker::Speaker::status_set_error();
+                this->state_ = ERROR;
                 return;
             }
 
@@ -53,7 +52,7 @@ namespace esphome
                 ESP_LOGE(TAG, "Failed to create buffer mutex");
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                speaker::Speaker::status_set_error();
+                this->state_ = ERROR;
                 return;
             }
 
@@ -63,11 +62,11 @@ namespace esphome
                 vSemaphoreDelete(this->buffer_mutex_);
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                speaker::Speaker::status_set_error();
+                this->state_ = ERROR;
                 return;
             }
 
-            this->state_ = state_t::IDLE;
+            this->state_ = IDLE;
 
             BaseType_t result = xTaskCreate(
                 speaker_task,
@@ -84,7 +83,7 @@ namespace esphome
                 vSemaphoreDelete(this->buffer_mutex_);
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                speaker::Speaker::status_set_error();
+                this->state_ = ERROR;
             }
         }
 
@@ -97,7 +96,7 @@ namespace esphome
 
             ESP_LOGD(TAG, "Stopping speaker task...");
 
-            this->state_ = state_t::STOPPED;
+            this->state_ = STOPPED;
 
             // Wait for the task to confirm shutdown
             if (xSemaphoreTake(this->shutdown_semaphore_, pdMS_TO_TICKS(100)) != pdTRUE) {
@@ -122,13 +121,12 @@ namespace esphome
             this->buffer_.reset();
 
             ESP_LOGD(TAG, "Speaker task stopped.");
-            this->state_ = state_t::IDLE;
-            speaker::Speaker::status_clear_error();
+            this->state_ = IDLE;
         }
 // Single core write function handling both data and optional finish
         size_t I2SAudioSpeaker::write(const uint8_t *data, size_t length, bool finish)
         {
-            if (this->state_ == state_t::STOPPED || this->task_handle_ == nullptr)
+            if (this->state_ == STOPPED || this->task_handle_ == nullptr)
             {
                 return 0;
             }
@@ -157,7 +155,7 @@ namespace esphome
             // Auto-interrupt logic: Check if this is a new task trying to write while playback ongoing
             TaskHandle_t current_task = xTaskGetCurrentTaskHandle();
             if (current_task != this->last_task_handle_ &&
-                (this->state_ == state_t::RUNNING || this->buffer_->available() > 0))
+                (this->state_ == RUNNING || this->buffer_->available() > 0))
             {
                 const char *old_name = (this->last_task_handle_ != nullptr) ? pcTaskGetName(this->last_task_handle_) : "None";
                 const char *new_name = pcTaskGetName(current_task);
@@ -187,7 +185,7 @@ namespace esphome
         }
         void I2SAudioSpeaker::interrupt()
         {
-            if (this->state_ == state_t::STOPPED || this->task_handle_ == nullptr)
+            if (this->state_ == STOPPED || this->task_handle_ == nullptr)
             {
                 return;
             }
@@ -212,7 +210,7 @@ namespace esphome
         // Retained for explicit/manual use (e.g., legacy or non-write callers)
         bool I2SAudioSpeaker::finish()
         {
-            if (this->state_ == state_t::STOPPED || this->task_handle_ == nullptr)
+            if (this->state_ == STOPPED || this->task_handle_ == nullptr)
             {
                 return false;
             }
@@ -270,7 +268,7 @@ namespace esphome
             if (err != ESP_OK)
             {
                 ESP_LOGW(TAG, "Error installing I2S driver: %s", esp_err_to_name(err));
-                instance->speaker::Speaker::status_set_error();
+                instance->state_ = ERROR;
                 instance->unlock();
                 instance->task_handle_ = nullptr;
                 vTaskDelete(NULL);
@@ -281,7 +279,7 @@ namespace esphome
             if (err != ESP_OK)
             {
                 ESP_LOGW(TAG, "Error enabling I2S channel: %s", esp_err_to_name(err));
-                instance->speaker::Speaker::status_set_error();
+                instance->state_ = ERROR;
                 instance->unlock();
                 instance->task_handle_ = nullptr;
                 vTaskDelete(NULL);
@@ -292,7 +290,7 @@ namespace esphome
             std::vector<uint8_t> silent_chunk(VOLUME_CHUNK_BYTES, 0);
 
             // Main Task Loop
-            while (instance->state_ != state_t::STOPPED)
+            while (instance->state_ != STOPPED)
             {
                 size_t bytes_read = instance->buffer_->read(chunk_buffer.data(), chunk_buffer.size(), pdMS_TO_TICKS(10));
 
@@ -304,9 +302,9 @@ namespace esphome
 
                 if (bytes_read > 0)
                 {
-                    if (instance->state_ == state_t::IDLE)
+                    if (instance->state_ == IDLE)
                     {
-                        instance->state_ = state_t::RUNNING;
+                        instance->state_ = RUNNING;
                         if (instance->sd_pin_ != GPIO_NUM_NC)
                         {
                             gpio_set_level(instance->sd_pin_, 1);
@@ -347,7 +345,7 @@ namespace esphome
                 }
                 else
                 {
-                    if (instance->state_ == state_t::RUNNING && (millis() - instance->last_write_timestamp_ > 200))
+                    if (instance->state_ == RUNNING && (millis() - instance->last_write_timestamp_ > 200))
                     {
                         ESP_LOGD(TAG, "Buffer idle; starting extended silence flush to prevent pop/repeat");
                         
@@ -369,7 +367,7 @@ namespace esphome
                         {
                             gpio_set_level(instance->sd_pin_, 0);
                         }
-                        instance->state_ = state_t::IDLE;
+                        instance->state_ = IDLE;
                         xSemaphoreGive(instance->completion_semaphore_);
                     }
                 }
