@@ -26,31 +26,12 @@ namespace esphome
 
 #define TASK_DONE_BIT BIT0
 
-    float MicroWakeWord::get_setup_priority() const
-    {
-      return setup_priority::AFTER_CONNECTION;
-    }
-
-    void MicroWakeWord::dump_config()
-    {
-      ESP_LOGI(TAG, "microWakeWord:");
-      ESP_LOGI(TAG, "  models:");
-      for (auto &model : this->wake_word_models_)
-      {
-        model.log_model_config();
-      }
-#ifdef USE_MICRO_WAKE_WORD_VAD
-      this->vad_model_->log_model_config();
-#endif
-    }
-
     void MicroWakeWord::setup()
     {
       ESP_LOGI(TAG, "Setting up microWakeWord...");
 
       if (!this->register_streaming_ops_(this->streaming_op_resolver_))
       {
-        this->mark_failed();
         this->state_ = state_t::ERROR;
         return;
       }
@@ -198,7 +179,6 @@ namespace esphome
           if (this->load_models_() && this->allocate_buffers_()) {
             this->reset_states_();
             this->set_state_(state_t::RUNNING);
-            this->status_clear_error();
             ESP_LOGI(TAG, "Recovery successful, resuming wake word detection.");
           } else {
             ESP_LOGE(TAG, "Recovery failed. Retrying in 2 seconds...");
@@ -233,7 +213,6 @@ namespace esphome
       this->ring_buffer_ = RingBuffer::create(BUFFER_SIZE * sizeof(int16_t));
       if (!this->ring_buffer_) {
         ESP_LOGE(TAG, "Failed to allocate ring buffer");
-        this->set_state_(state_t::ERROR);
         return false;
       }
 
@@ -241,7 +220,6 @@ namespace esphome
       this->preprocessor_audio_buffer_ = audio_samples_allocator.allocate(this->new_samples_to_get_());
       if (!this->preprocessor_audio_buffer_) {
         ESP_LOGE(TAG, "Failed to allocate preprocessor audio buffer");
-        this->set_state_(state_t::ERROR);
         return false;
       }
 
@@ -265,7 +243,6 @@ namespace esphome
       {
         ESP_LOGD(TAG, "Failed to populate frontend state");
         FrontendFreeStateContents(&this->frontend_state_);
-        this->set_state_(state_t::ERROR);
         return false;
       }
 
@@ -380,11 +357,10 @@ namespace esphome
       if (bytes_read == 0)
       {
         ESP_LOGE(TAG, "Could not read data from Ring Buffer");
-        this->set_state_(state_t::ERROR);
+        return false;
       }
       else if (bytes_read < this->new_samples_to_get_() * sizeof(int16_t))
       {
-        ESP_LOGD(TAG, "Partial Read of Data by Model");
         return false;
       }
 
