@@ -12,7 +12,7 @@
 #include <tensorflow/lite/micro/micro_interpreter.h>
 #include <tensorflow/lite/micro/micro_mutable_op_resolver.h>
 
-#include "esphome/components/i2s_audio/microphone/i2s_audio_microphone.h"
+#include "esphome/components/i2s_audio/i2s_audio.h"
 #include "esphome/core/ring_buffer.h"
 #include "preprocessor_settings.h"
 #include "streaming_model.h"
@@ -25,29 +25,16 @@ namespace esphome
     // The number of audio slices to process before accepting a positive detection
     static const uint8_t MIN_SLICES_BEFORE_DETECTION = 74;
 
-    enum state_t : uint8_t {
-      STOPPED = 0,
-      RUNNING,
-      IDLE,  // Used for paused state
-      ERROR,
-    };
-
-    inline bool is_running(state_t s) { return s == state_t::RUNNING; }
-    inline bool has_failed(state_t s) { return s == state_t::ERROR; }
-
-    class MicroWakeWord
+    class MicroWakeWord : public i2s_audio::I2SAudioComponent
     {
     public:
       void setup();
-      void start();
-      void stop();
+      void start() override;
+      void stop() override;
       void reset();
 
       void pause();
       void resume();
-
-      bool is_running() const { return micro_wake_word::is_running(this->state_); }
-      bool has_error() const { return micro_wake_word::has_failed(this->state_); }
 
       void set_features_step_size(uint8_t step_size)
       {
@@ -76,7 +63,6 @@ namespace esphome
 
     protected:
       i2s_audio::I2SAudioMicrophone *microphone_{nullptr};
-      state_t state_{state_t::RUNNING};
       
       TaskHandle_t processing_task_handle_{nullptr};
       EventGroupHandle_t task_events_{nullptr};
@@ -103,8 +89,6 @@ namespace esphome
       bool detected_{false};
       std::string detected_wake_word_{""};
       CallbackManager<void(std::string)> detection_callbacks_{};
-
-      void set_state_(state_t state);
 
       bool has_enough_samples_();
       bool allocate_buffers_();

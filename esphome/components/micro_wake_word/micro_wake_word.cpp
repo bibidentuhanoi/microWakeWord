@@ -32,7 +32,7 @@ namespace esphome
 
       if (!this->register_streaming_ops_(this->streaming_op_resolver_))
       {
-        this->state_ = state_t::ERROR;
+        this->report_error(i2s_audio::ErrorCode::MODEL_OPS_REGISTER_FAILED, "Failed to register streaming ops");
         return;
       }
 
@@ -56,7 +56,7 @@ namespace esphome
 
       // Start detecting immediately
       if (!this->load_models_() || !this->allocate_buffers_()) {
-        this->state_ = state_t::ERROR;
+        // Errors are already reported in the called functions
         return;
       }
 
@@ -64,26 +64,39 @@ namespace esphome
           [this](const int16_t *data, size_t num_samples) { this->on_audio_received(data, num_samples); });
 
       this->data_sem_ = xSemaphoreCreateBinary();
+      if (!this->data_sem_) {
+          this->report_error(i2s_audio::ErrorCode::SEMAPHORE_CREATE_FAILED, "Failed to create data semaphore");
+          return;
+      }
 
       this->task_events_ = xEventGroupCreate();
+      if (!this->task_events_) {
+          this->report_error(i2s_audio::ErrorCode::EVENT_GROUP_CREATE_FAILED, "Failed to create task events");
+          return;
+      }
 
-      xTaskCreate(this->processing_task_wrapper, "ww_process", 4096, this, 5, &this->processing_task_handle_);
+      this->state_ = i2s_audio::State::RUNNING;
 
-      this->set_state_(state_t::RUNNING);
+      if (xTaskCreate(this->processing_task_wrapper, "ww_process", 4096, this, 5, &this->processing_task_handle_) != pdPASS) {
+          this->report_error(i2s_audio::ErrorCode::TASK_CREATE_FAILED, "Failed to create processing task");
+          return;
+      }
     }
 
     void MicroWakeWord::start() {
       // Since it starts automatically, start() can be a no-op or resume if paused/stopped
-      if (this->state_ == state_t::STOPPED || this->state_ == state_t::IDLE) {
+      if (this->state_ == i2s_audio::State::STOPPED || this->state_ == i2s_audio::State::IDLE) {
         this->resume();
       }
     }
 
     void MicroWakeWord::stop() {
-      this->set_state_(state_t::STOPPED);
+      this->state_ = i2s_audio::State::STOPPED;
 
       if (this->processing_task_handle_) {
-        xEventGroupWaitBits(this->task_events_, TASK_DONE_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(500));
+        if (xEventGroupWaitBits(this->task_events_, TASK_DONE_BIT, pdTRUE, pdFALSE, pdMS_TO_TICKS(500)) == 0) {
+            this->report_error(i2s_audio::ErrorCode::TASK_SHUTDOWN_TIMEOUT, "Processing task did not shut down cleanly");
+        }
         vEventGroupDelete(this->task_events_);
         this->task_events_ = nullptr;
         this->processing_task_handle_ = nullptr;
@@ -101,11 +114,11 @@ namespace esphome
     }
 
     void MicroWakeWord::pause() {
-      this->set_state_(state_t::IDLE);
+      this->state_ = i2s_audio::State::IDLE;
     }
 
     void MicroWakeWord::resume() {
-      this->set_state_(state_t::RUNNING);
+      this->state_ = i2s_audio::State::RUNNING;
     }
 
     void MicroWakeWord::add_wake_word_model(const uint8_t *model_start,
@@ -135,27 +148,26 @@ namespace esphome
     }
 
     void MicroWakeWord::processing_task() {
-      while (this->state_ != state_t::STOPPED) {
+      while (this->state_ != i2s_audio::State::STOPPED) {
         
         ESP_LOGD(TAG, "Processing task: beginning detection loop.");
 
-        while (micro_wake_word::is_running(this->state_)) {
+        while (this->state_ == i2s_audio::State::RUNNING) {
           
           while (!this->has_enough_samples_()) {
             if (xSemaphoreTake(this->data_sem_, pdMS_TO_TICKS(1000)) != pdTRUE) {
               if (this->microphone_->has_error()) {
-                ESP_LOGE(TAG, "Microphone error detected; setting state to ERROR");
-                this->set_state_(state_t::ERROR);
+                this->report_error(i2s_audio::ErrorCode::MICROPHONE_HAS_ERROR, "Microphone error detected");
                 break;
               }
               continue;
             }
           }
-          if (this->state_ == state_t::ERROR) break;
+          if (this->state_ == i2s_audio::State::ERROR) break;
           
           this->update_model_probabilities_();
-          if (this->state_ == state_t::ERROR) {
-            ESP_LOGE(TAG, "Error during model probability update.");
+          if (this->state_ == i2s_audio::State::ERROR) {
+            this->report_error(i2s_audio::ErrorCode::PROBABILITY_UPDATE_FAILED, "Error during model probability update");
             break; 
           }
 
@@ -169,7 +181,7 @@ namespace esphome
           }
         }
         
-        if (this->state_ == state_t::ERROR) {
+        if (this->state_ == i2s_audio::State::ERROR) {
           ESP_LOGE(TAG, "Error detected in processing task. Initiating recovery...");
           this->unload_models_();
           this->deallocate_buffers_();
@@ -178,13 +190,13 @@ namespace esphome
           
           if (this->load_models_() && this->allocate_buffers_()) {
             this->reset_states_();
-            this->set_state_(state_t::RUNNING);
+            this->state_ = i2s_audio::State::RUNNING;
             ESP_LOGI(TAG, "Recovery successful, resuming wake word detection.");
           } else {
-            ESP_LOGE(TAG, "Recovery failed. Retrying in 2 seconds...");
+            this->report_error(i2s_audio::ErrorCode::GENERIC_ERROR, "Recovery failed");
             vTaskDelay(pdMS_TO_TICKS(2000));
           }
-        } else if (this->state_ == state_t::IDLE) {
+        } else if (this->state_ == i2s_audio::State::IDLE) {
           vTaskDelay(pdMS_TO_TICKS(100));  // Prevent busy loop during pause
         }
       }
@@ -195,15 +207,11 @@ namespace esphome
       vTaskDelete(NULL);
     }
 
-    void MicroWakeWord::set_state_(state_t state) {
-      this->state_ = state;
-    }
-
     void MicroWakeWord::on_audio_received(const int16_t *data, size_t num_samples) {
       // Assuming ring_buffer_ is allocated in allocate_buffers_
       size_t bytes_written = this->ring_buffer_->write((void *)data, num_samples * sizeof(int16_t));
       if (bytes_written < num_samples * sizeof(int16_t)) {
-        ESP_LOGW(TAG, "Ring buffer overflow");
+        this->report_error(i2s_audio::ErrorCode::RING_BUFFER_WRITE_FAILED, "Ring buffer overflow");
       }
       xSemaphoreGive(this->data_sem_);
     }
@@ -212,14 +220,14 @@ namespace esphome
     {
       this->ring_buffer_ = RingBuffer::create(BUFFER_SIZE * sizeof(int16_t));
       if (!this->ring_buffer_) {
-        ESP_LOGE(TAG, "Failed to allocate ring buffer");
+        this->report_error(i2s_audio::ErrorCode::ALLOC_FAILED, "Failed to allocate ring buffer");
         return false;
       }
 
       ExternalRAMAllocator<int16_t> audio_samples_allocator(ExternalRAMAllocator<int16_t>::ALLOW_FAILURE);
       this->preprocessor_audio_buffer_ = audio_samples_allocator.allocate(this->new_samples_to_get_());
       if (!this->preprocessor_audio_buffer_) {
-        ESP_LOGE(TAG, "Failed to allocate preprocessor audio buffer");
+        this->report_error(i2s_audio::ErrorCode::ALLOC_FAILED, "Failed to allocate preprocessor audio buffer");
         return false;
       }
 
@@ -241,7 +249,7 @@ namespace esphome
       if (!FrontendPopulateState(&this->frontend_config_, &this->frontend_state_,
                                  AUDIO_SAMPLE_FREQUENCY))
       {
-        ESP_LOGD(TAG, "Failed to populate frontend state");
+        this->report_error(i2s_audio::ErrorCode::FRONTEND_POPULATE_FAILED, "Failed to populate frontend state");
         FrontendFreeStateContents(&this->frontend_state_);
         return false;
       }
@@ -250,16 +258,14 @@ namespace esphome
       {
         if (!model.load_model(this->streaming_op_resolver_))
         {
-          ESP_LOGE(TAG, "Failed to initialize a wake word model %s.", model.get_wake_word().c_str());
-          this->set_state_(state_t::ERROR);
+          this->report_error(i2s_audio::ErrorCode::WAKE_WORD_MODEL_INIT_FAILED, "Failed to initialize a wake word model %s.", model.get_wake_word().c_str());
           return false;
         }
       }
 #ifdef USE_MICRO_WAKE_WORD_VAD
       if (!this->vad_model_->load_model(this->streaming_op_resolver_))
       {
-        ESP_LOGE(TAG, "Failed to initialize VAD model.");
-        this->set_state_(state_t::ERROR);
+        this->report_error(i2s_audio::ErrorCode::VAD_MODEL_INIT_FAILED, "Failed to initialize VAD model.");
         return false;
       }
 #endif
@@ -356,7 +362,7 @@ namespace esphome
 
       if (bytes_read == 0)
       {
-        ESP_LOGE(TAG, "Could not read data from Ring Buffer");
+        this->report_error(i2s_audio::ErrorCode::RING_BUFFER_READ_FAILED, "Could not read data from Ring Buffer");
         return false;
       }
       else if (bytes_read < this->new_samples_to_get_() * sizeof(int16_t))
@@ -439,5 +445,4 @@ namespace esphome
 
   } 
 } 
-
 #endif

@@ -22,8 +22,7 @@ void I2SAudioMicrophone::setup() {
   this->callback_mutex_ = xSemaphoreCreateMutex();
   this->control_events_ = xEventGroupCreate();
   if (!this->callback_mutex_ || !this->control_events_) {
-    ESP_LOGE(TAG, "Failed to create sync primitives");
-    this->state_ = ERROR;
+    this->report_error(ErrorCode::MIC_PRIMITIVES_ALLOC_FAILED, "Failed to create sync primitives");
     return;
   }
   this->primitives_allocated_ = true;
@@ -46,7 +45,7 @@ size_t I2SAudioMicrophone::read(int16_t *buf, size_t len) {
 
 size_t I2SAudioMicrophone::subscribe(std::function<void(const int16_t *, size_t)> &&callback) {
   if (!this->primitives_allocated_) {
-    ESP_LOGE(TAG, "Primitives not allocated; call setup() first");
+    this->report_error(ErrorCode::MIC_PRIMITIVES_ALLOC_FAILED, "Primitives not allocated; call setup() first");
     return 0;
   }
   xSemaphoreTake(this->callback_mutex_, portMAX_DELAY);
@@ -77,15 +76,13 @@ void I2SAudioMicrophone::internal_start() {
   if (this->is_running()) return;
 
   if (this->din_pin_ == I2S_GPIO_UNUSED) {
-    ESP_LOGE(TAG, "DIN pin not set");
-    this->state_ = ERROR;
+    this->report_error(ErrorCode::I2S_PIN_CONFIG_INVALID, "DIN pin not set");
     return;
   }
 #if SOC_I2S_SUPPORTS_ADC
   if (this->adc_) {
     if (this->parent_->get_port() != I2S_NUM_0) {
-      ESP_LOGE(TAG, "Internal ADC only works on I2S0!");
-      this->state_ = ERROR;
+      this->report_error(ErrorCode::MIC_ADC_CONFIG_INVALID, "Internal ADC only works on I2S0!");
       return;
     }
   }
@@ -117,14 +114,12 @@ void I2SAudioMicrophone::internal_start() {
   rx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_LEFT;
   err = i2s_channel_init_std_mode(this->channel_, &rx_std_cfg);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Error initializing I2S channel: %s", esp_err_to_name(err));
-    this->state_ = ERROR;
+    this->report_error(ErrorCode::I2S_CHANNEL_INIT_FAILED, "Error initializing I2S channel: %s", esp_err_to_name(err));
     return;
   }
   err = i2s_channel_enable(this->channel_);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Error enabling I2S channel: %s", esp_err_to_name(err));
-    this->state_ = ERROR;
+    this->report_error(ErrorCode::I2S_CHANNEL_ENABLE_FAILED, "Error enabling I2S channel: %s", esp_err_to_name(err));
     return;
   }
 
@@ -143,8 +138,7 @@ void I2SAudioMicrophone::internal_stop() {
   
   esp_err_t err = i2s_channel_disable(this->channel_);
   if (err != ESP_OK) {
-    ESP_LOGW(TAG, "Error disabling I2S channel: %s", esp_err_to_name(err));
-    this->state_ = ERROR;
+    this->report_error(ErrorCode::I2S_CHANNEL_DISABLE_FAILED, "Error disabling I2S channel: %s", esp_err_to_name(err));
   }
 
   xEventGroupWaitBits(this->control_events_, DONE_EVENT, pdTRUE, pdFALSE, pdMS_TO_TICKS(100));
@@ -152,8 +146,7 @@ void I2SAudioMicrophone::internal_stop() {
   if (this->channel_ != nullptr) {
       err = i2s_del_channel(this->channel_);
       if (err != ESP_OK) {
-          ESP_LOGW(TAG, "Error deleting I2S channel: %s", esp_err_to_name(err));
-          this->state_ = ERROR;
+          this->report_error(ErrorCode::I2S_CHANNEL_DELETE_FAILED, "Error deleting I2S channel: %s", esp_err_to_name(err));
       }
       this->channel_ = nullptr;
   }
@@ -174,8 +167,7 @@ void I2SAudioMicrophone::mic_reader_task(void *param) {
 
     if (err != ESP_OK || !self->running_) {
       if (self->running_) {
-          ESP_LOGW(TAG, "I2S read error: %s", esp_err_to_name(err));
-          self->state_ = ERROR;
+          self->report_error(ErrorCode::I2S_READ_FAILED, "I2S read error: %s", esp_err_to_name(err));
       }
       break;
     }

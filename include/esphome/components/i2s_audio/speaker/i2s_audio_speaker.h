@@ -24,7 +24,7 @@ namespace esphome
             void setup();
             void start() override;
             void stop() override;
-            size_t write(const uint8_t *data, size_t length, bool finish = false);
+            size_t write(const uint8_t *data, size_t length, bool finish = true);
             
             // Configuration setters
             void set_dout_pin(gpio_num_t pin) { this->dout_pin_ = pin; }

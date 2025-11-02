@@ -32,37 +32,33 @@ namespace esphome
             this->buffer_ = RingBuffer::create(this->buffer_size_);
             if (!this->buffer_)
             {
-                ESP_LOGE(TAG, "Failed to create ring buffer");
-                this->state_ = ERROR;
+                this->report_error(ErrorCode::ALLOC_FAILED, "Failed to create ring buffer");
                 return;
             }
 
             this->completion_semaphore_ = xSemaphoreCreateBinary();
             if (this->completion_semaphore_ == nullptr)
             {
-                ESP_LOGE(TAG, "Failed to create completion semaphore");
+                this->report_error(ErrorCode::SEMAPHORE_CREATE_FAILED, "Failed to create completion semaphore");
                 this->buffer_.reset();
-                this->state_ = ERROR;
                 return;
             }
 
             this->buffer_mutex_ = xSemaphoreCreateMutex();
             if (this->buffer_mutex_ == nullptr)
             {
-                ESP_LOGE(TAG, "Failed to create buffer mutex");
+                this->report_error(ErrorCode::MUTEX_CREATE_FAILED, "Failed to create buffer mutex");
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                this->state_ = ERROR;
                 return;
             }
 
             this->shutdown_semaphore_ = xSemaphoreCreateBinary();
             if (this->shutdown_semaphore_ == nullptr) {
-                ESP_LOGE(TAG, "Failed to create shutdown semaphore");
+                this->report_error(ErrorCode::SEMAPHORE_CREATE_FAILED, "Failed to create shutdown semaphore");
                 vSemaphoreDelete(this->buffer_mutex_);
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                this->state_ = ERROR;
                 return;
             }
 
@@ -79,11 +75,10 @@ namespace esphome
             if (result != pdPASS)
             {
                 this->task_handle_ = nullptr;
-                ESP_LOGE(TAG, "Failed to create speaker task");
+                this->report_error(ErrorCode::TASK_CREATE_FAILED, "Failed to create speaker task");
                 vSemaphoreDelete(this->buffer_mutex_);
                 vSemaphoreDelete(this->completion_semaphore_);
                 this->buffer_.reset();
-                this->state_ = ERROR;
             }
         }
 
@@ -100,7 +95,7 @@ namespace esphome
 
             // Wait for the task to confirm shutdown
             if (xSemaphoreTake(this->shutdown_semaphore_, pdMS_TO_TICKS(100)) != pdTRUE) {
-                ESP_LOGW(TAG, "Speaker task did not shut down cleanly.");
+                this->report_error(ErrorCode::TASK_SHUTDOWN_TIMEOUT, "Speaker task did not shut down cleanly.");
                 // If timeout occurs, forcefully delete the task
                 if (this->task_handle_ != nullptr) {
                     vTaskDelete(this->task_handle_);
@@ -148,7 +143,7 @@ namespace esphome
             // Normal data write (length > 0)
             if (xSemaphoreTake(this->buffer_mutex_, pdMS_TO_TICKS(100)) != pdTRUE)
             {
-                ESP_LOGW(TAG, "Failed to acquire buffer mutex in write");
+                this->report_error(ErrorCode::BUFFER_MUTEX_ACQUIRE_FAILED, "Failed to acquire buffer mutex in write");
                 return 0;
             }
 
@@ -225,7 +220,7 @@ namespace esphome
 
             if (!instance->try_lock())
             {
-                ESP_LOGE(TAG, "Failed to lock I2S peripheral");
+                instance->report_error(ErrorCode::GENERIC_ERROR, "Failed to lock I2S peripheral");
                 instance->task_handle_ = nullptr;
                 vTaskDelete(NULL);
                 return;
@@ -267,8 +262,7 @@ namespace esphome
             err = i2s_channel_init_std_mode(instance->channel_, &tx_std_cfg);
             if (err != ESP_OK)
             {
-                ESP_LOGW(TAG, "Error installing I2S driver: %s", esp_err_to_name(err));
-                instance->state_ = ERROR;
+                instance->report_error(ErrorCode::I2S_CHANNEL_INIT_FAILED, "Error installing I2S driver: %s", esp_err_to_name(err));
                 instance->unlock();
                 instance->task_handle_ = nullptr;
                 vTaskDelete(NULL);
@@ -278,8 +272,7 @@ namespace esphome
             err = i2s_channel_enable(instance->channel_);
             if (err != ESP_OK)
             {
-                ESP_LOGW(TAG, "Error enabling I2S channel: %s", esp_err_to_name(err));
-                instance->state_ = ERROR;
+                instance->report_error(ErrorCode::I2S_CHANNEL_ENABLE_FAILED, "Error enabling I2S channel: %s", esp_err_to_name(err));
                 instance->unlock();
                 instance->task_handle_ = nullptr;
                 vTaskDelete(NULL);
