@@ -50,6 +50,13 @@ bool StreamingModel::load_model(
   }
 
   const tflite::Model *model = tflite::GetModel(this->model_start_);
+// --- ADD THIS CHECK TO FIX THE CRASH ---
+  if (model == nullptr) {
+    ESP_LOGE(TAG, "Failed to get TFLite model. Model data is NULL or corrupt.");
+    return false; // Exit gracefully instead of crashing
+  }
+  // ----------------------------------------
+
   if (model->version() != TFLITE_SCHEMA_VERSION) {
     ESP_LOGE(TAG, "Streaming model's schema is not supported");
     return false;
