@@ -1,0 +1,15 @@
+version: "0.0.1"
+description: "MicroWakeWord Standalone Example for Beemo Detection"
+license: "GPLv3"
+tags:
+  - microwakeword
+  - wakeword
+  - hotword
+  - component
+
+requires_idf_version: ">=5.3"
+
+dependencies:
+  espressif/esp-tflite-micro: "*"
+  microWakeWord:
+    git: https://github.com/bibidentuhanoi/MicroWakeWord-IDF

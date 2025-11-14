@@ -2,6 +2,10 @@
 
 This project is a standalone C++ library for ESP32, providing solid I2S audio components for microphone, speaker, and wake word detection. The core components are derived from the excellent work done in the [ESPHome project](https://esphome.io/) and have been refactored to be used as a self-contained ESP-IDF library.
 
+> ⚠️ **Hardware Compatibility Note**
+> At the moment, this library is intended for and has been tested on **dual-core ESP32 variants with PSRAM enabled**.
+
+
 ## Introduction
 
 This library provides a set of high-level C++ classes to simplify audio processing on the ESP32. It is designed for real-time applications, such as voice assistants, and is built on top of FreeRTOS for non-blocking, concurrent operation.
@@ -39,14 +43,16 @@ Configure the I/O pins and I2S parameters for each component.
 microphone.set_bclk_pin(I2S_MIC_BCK_PIN);
 microphone.set_lrclk_pin(I2S_MIC_WS_PIN);
 microphone.set_din_pin(I2S_MIC_SD_PIN);
-microphone.set_sample_rate(16000);
+microphone.set_sample_rate(I2S_DATA_BIT_WIDTH_16BIT);
+microphone.set_bits_per_sample(I2S_DATA_BIT_WIDTH_32BIT);
 microphone.setup();
 
 // Configure Speaker
 speaker.set_bclk_pin(I2S_SPEAKER_BCLK_PIN);
 speaker.set_lrclk_pin(I2S_SPEAKER_LRC_PIN);
 speaker.set_dout_pin(I2S_SPEAKER_DOUT_PIN);
-speaker.set_sample_rate(16000);
+speaker.set_sample_rate(I2S_DATA_BIT_WIDTH_16BIT);
+speaker.set_bits_per_sample(I2S_DATA_BIT_WIDTH_16BIT);
 speaker.setup();
 speaker.start(); // Start the background task
 ```
@@ -140,4 +146,5 @@ The library is designed around a few core principles to ensure stability and mod
 ## Future Roadmap (TODO)
 
   - [ ] Add a guide or Jupyter/Colab notebook for training custom wake word models.
-  - [ ] Add more complete examples (e.g., a full voice assistant loop, audio playback examples).
+  - [ ] Add more complete examples.
+  - [ ] Test on other ESP32 variants.
