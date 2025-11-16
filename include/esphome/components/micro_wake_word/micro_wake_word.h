@@ -6,7 +6,7 @@
 #include <freertos/task.h>
 #include <freertos/semphr.h>
 #include <freertos/event_groups.h>
-#include <freertos/queue.h> // Added for completion queue
+#include <freertos/queue.h>
 
 #include <frontend_util.h>
 #include <tensorflow/lite/core/c/common.h>
@@ -49,7 +49,6 @@ namespace esphome
         this->microphone_ = microphone;
       }
 
-      // Modified to remove run_in_parallel param (automation handles it)
       void add_wake_word_model(const uint8_t *model_start, float probability_cutoff,
                                size_t sliding_window_average_size,
                                const std::string &wake_word,
@@ -62,7 +61,6 @@ namespace esphome
       }
 
 #ifdef USE_MICRO_WAKE_WORD_VAD
-      // Modified to remove run_in_parallel param (automation handles it)
       void add_vad_model(const uint8_t *model_start, float probability_cutoff,
                          size_t sliding_window_size, size_t tensor_arena_size,
                          uint32_t run_every_k_frames = 1);
@@ -72,16 +70,15 @@ namespace esphome
       i2s_audio::I2SAudioMicrophone *microphone_{nullptr};
       
       // --- Producer Task ---
-      TaskHandle_t processing_task_handle_{nullptr}; // This is now the "Producer"
+      TaskHandle_t processing_task_handle_{nullptr};
       EventGroupHandle_t task_events_{nullptr};
       static void processing_task_wrapper(void *param);
-      void processing_task(); // This function becomes the "Producer" loop
+      void processing_task(); 
 
       std::unique_ptr<RingBuffer> ring_buffer_;
 
       // --- Model Management (Parallel Consumers) ---
-      std::vector<WakeWordModel> wake_word_models_; // Owns the TFLM model data
-
+      std::vector<WakeWordModel> wake_word_models_; 
       // New structure to manage parallel consumer tasks
       struct ModelTaskContext {
         WakeWordModel *model{nullptr}; // Pointer to the model in wake_word_models_

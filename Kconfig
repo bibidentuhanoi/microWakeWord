@@ -1,0 +1,80 @@
+# Kconfig for Microwakeword-IDF
+
+menu "Microwakeword-IDF Configuration"
+
+    if !CONFIG_FREERTOS_UNICORE
+
+        config ESP_IDF_TASK_PINNING_ENABLED
+            bool "Enable Task Pinning"
+            default y
+            help
+                Enable this option to pin tasks to specific CPU cores.
+
+        if ESP_IDF_TASK_PINNING_ENABLED
+
+            choice ESP_IDF_CORE_PINNING_STRATEGY
+                prompt "Core Pinning Strategy"
+                default ESP_IDF_DISTRIBUTE_TASKS_MANUALLY
+                help
+                    Select how to assign tasks to CPU cores.
+
+                config ESP_IDF_DISTRIBUTE_TASKS_MANUALLY
+                    bool "Distribute tasks manually"
+                    help
+                        Allows setting the core for each task individually.
+
+                config ESP_IDF_FORCE_ALL_TASKS_TO_CORE_0
+                    bool "Force all tasks to Core 0"
+                    help
+                        Pins all component tasks to Core 0 for simplicity or debugging.
+
+            endchoice
+
+            if ESP_IDF_DISTRIBUTE_TASKS_MANUALLY
+
+                config ESP_IDF_SPEAKER_TASK_CORE
+                    int "Speaker Task Core"
+                    default 0
+                    range 0 1
+                    help
+                        The core to pin the speaker task to.
+
+                config ESP_IDF_MIC_TASK_CORE
+                    int "Microphone Task Core"
+                    default 0
+                    range 0 1
+                    help
+                        The core to pin the microphone task to.
+
+                config ESP_IDF_WAKE_WORD_PRODUCER_TASK_CORE
+                    int "Wake Word Producer Task Core"
+                    default 1
+                    range 0 1
+                    help
+                        The core to pin the wake word producer task to.
+
+                config ESP_IDF_WAKE_WORD_CONSUMER_TASK_CORE
+                    int "Wake Word Consumer Task Core"
+                    default 1
+                    range 0 1
+                    help
+                        The core to pin the wake word consumer task to.
+            endif # ESP_IDF_DISTRIBUTE_TASKS_MANUALLY
+
+        endif # ESP_IDF_TASK_PINNING_ENABLED
+
+    endif # !CONFIG_FREERTOS_UNICORE
+
+    config ESP_IDF_SPEAKER_BUFFER_SIZE
+        int "Speaker Buffer Size"
+        default 65536
+        help
+            The size of the speaker's ring buffer in bytes.
+
+    config ESP_IDF_WAKE_WORD_BUFFER_SIZE
+        int "Wake Word Buffer Size"
+        default 2048
+        help
+            The size of the wake word's ring buffer in bytes.
+
+endmenu

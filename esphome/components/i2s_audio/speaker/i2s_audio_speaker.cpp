@@ -1,6 +1,5 @@
-// Updated i2s_audio_speaker.cpp
-// i2s_audio_speaker.cpp
 #include "esphome/components/i2s_audio/speaker/i2s_audio_speaker.h"
+#include "sdkconfig.h"
 
 #ifdef USE_ESP32
 
@@ -12,12 +11,13 @@ namespace esphome
     namespace i2s_audio
     {
         static const char *const TAG = "i2s_audio.speaker";
-        constexpr size_t VOLUME_CHUNK_SAMPLES = 256;  // 2.67ms @ 48kHz (optimal stack size)
+        constexpr size_t VOLUME_CHUNK_SAMPLES = 256;
         constexpr size_t VOLUME_CHUNK_BYTES = VOLUME_CHUNK_SAMPLES * sizeof(int16_t);
         
         void I2SAudioSpeaker::setup()
         {
             ESP_LOGI(TAG, "Setting up I2S Audio Speaker...");
+            this->buffer_size_ = CONFIG_ESP_IDF_SPEAKER_BUFFER_SIZE;
         }
 
         void I2SAudioSpeaker::start()
@@ -64,14 +64,31 @@ namespace esphome
 
             this->state_ = IDLE;
 
-            BaseType_t result = xTaskCreate(
+            BaseType_t result;
+#if defined(CONFIG_ESP_IDF_TASK_PINNING_ENABLED) && !CONFIG_FREERTOS_UNICORE
+            #ifdef CONFIG_ESP_IDF_FORCE_ALL_TASKS_TO_CORE_0
+                const BaseType_t core_id = 0;
+            #else
+                const BaseType_t core_id = CONFIG_ESP_IDF_SPEAKER_TASK_CORE;
+            #endif
+            result = xTaskCreatePinnedToCore(
+                speaker_task,
+                "speaker_task",
+                4096, // Stack size in words
+                this, // Task parameter
+                tskIDLE_PRIORITY + 2,
+                &this->task_handle_,
+                core_id
+            );
+#else
+            result = xTaskCreate(
                 speaker_task,
                 "speaker_task",
                 4096, // Stack size in words
                 this, // Task parameter
                 tskIDLE_PRIORITY + 2,
                 &this->task_handle_);
-
+#endif
             if (result != pdPASS)
             {
                 this->task_handle_ = nullptr;
@@ -118,7 +135,7 @@ namespace esphome
             ESP_LOGD(TAG, "Speaker task stopped.");
             this->state_ = IDLE;
         }
-// Single core write function handling both data and optional finish
+
         size_t I2SAudioSpeaker::write(const uint8_t *data, size_t length, bool finish)
         {
             if (this->state_ == STOPPED || this->task_handle_ == nullptr)
@@ -191,8 +208,7 @@ namespace esphome
                 this->interrupted_ = true;
                 this->buffer_->reset();
 
-                // Flush any pending DMA by writing silence (ensures no I2S hardware leftovers)
-                std::vector<uint8_t> silence(VOLUME_CHUNK_BYTES * 2, 0);  // Small silence chunk
+                std::vector<uint8_t> silence(VOLUME_CHUNK_BYTES * 2, 0);
                 size_t bytes_written = 0;
                 i2s_channel_write(this->channel_, silence.data(), silence.size(), &bytes_written, pdMS_TO_TICKS(10));
                 ESP_LOGD(TAG, "DMA flushed with %d silence bytes", bytes_written);
@@ -202,7 +218,6 @@ namespace esphome
             xSemaphoreGive(this->completion_semaphore_);
         }
 
-        // Retained for explicit/manual use (e.g., legacy or non-write callers)
         bool I2SAudioSpeaker::finish()
         {
             if (this->state_ == STOPPED || this->task_handle_ == nullptr)
@@ -241,10 +256,10 @@ namespace esphome
                 .clk_cfg = {
                     .sample_rate_hz = instance->sample_rate_,
                     .clk_src = I2S_CLK_SRC_DEFAULT,
-                    .ext_clk_freq_hz = 0,  // Explicitly initialize
-                    .mclk_multiple = I2S_MCLK_MULTIPLE_256,  // Changed to 256 for better 16kHz support
+                    .ext_clk_freq_hz = 0,
+                    .mclk_multiple = I2S_MCLK_MULTIPLE_256,
                 },
-                .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(instance->bits_per_sample_, I2S_SLOT_MODE_STEREO),  // Changed to STEREO to avoid mono swap bug
+                .slot_cfg = I2S_STD_PHILIPS_SLOT_DEFAULT_CONFIG(instance->bits_per_sample_, I2S_SLOT_MODE_STEREO),
                 .gpio_cfg = {
                     .mclk = instance->mclk_pin_,
                     .bclk = instance->bclk_pin_,
@@ -257,7 +272,7 @@ namespace esphome
                         .ws_inv = false,
                     },
                 }};
-            tx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;  // Use both slots (duplicate mono to stereo)
+            tx_std_cfg.slot_cfg.slot_mask = I2S_STD_SLOT_BOTH;
 
             err = i2s_channel_init_std_mode(instance->channel_, &tx_std_cfg);
             if (err != ESP_OK)
@@ -334,7 +349,7 @@ namespace esphome
 
                     size_t bytes_written = 0;
                     i2s_channel_write(instance->channel_, stereo_chunk.data(), mono_bytes * 2, &bytes_written, portMAX_DELAY);
-                    ESP_LOGD(TAG, "Wrote %d stereo bytes (from %d mono)", bytes_written, mono_bytes);  // Add for debug
+                    ESP_LOGD(TAG, "Wrote %d stereo bytes (from %d mono)", bytes_written, mono_bytes);
                 }
                 else
                 {
@@ -342,17 +357,16 @@ namespace esphome
                     {
                         ESP_LOGD(TAG, "Buffer idle; starting extended silence flush to prevent pop/repeat");
                         
-                        // Extended flush: Write silence in loops for ~500ms to fully drain DMA and fade amp
                         const size_t flush_duration_ms = 500;
-                        const size_t silence_per_loop = silent_chunk.size();  // ~128ms stereo
+                        const size_t silence_per_loop = silent_chunk.size();
                         size_t total_flushed = 0;
                         auto start_time = millis();
                         while ((millis() - start_time) < flush_duration_ms) {
                             size_t bytes_written = 0;
                             i2s_channel_write(instance->channel_, silent_chunk.data(), silence_per_loop, &bytes_written, pdMS_TO_TICKS(10));
                             total_flushed += bytes_written;
-                            if (bytes_written < silence_per_loop) break;  // I2S stalled
-                            vTaskDelay(pdMS_TO_TICKS(1));  // Yield
+                            if (bytes_written < silence_per_loop) break;
+                            vTaskDelay(pdMS_TO_TICKS(1));
                         }
                         ESP_LOGD(TAG, "Flushed %lu silence bytes over %lu ms", static_cast<unsigned long>(total_flushed), static_cast<unsigned long>(millis() - start_time));
 

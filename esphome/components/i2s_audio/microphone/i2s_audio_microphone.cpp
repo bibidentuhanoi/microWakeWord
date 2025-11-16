@@ -1,5 +1,5 @@
-// Updated i2s_audio_microphone.cpp (key changes: enum references updated to new State values; state_ set to ERROR on error conditions; initial state preserved as STOPPED via parent; minimal adjustments to internal_stop for early state setting)
 #include "esphome/components/i2s_audio/microphone/i2s_audio_microphone.h"
+#include "sdkconfig.h"
 
 #ifdef USE_ESP32
 
@@ -124,7 +124,17 @@ void I2SAudioMicrophone::internal_start() {
   }
 
   this->running_ = true;
-  xTaskCreate(I2SAudioMicrophone::mic_reader_task, "mic_read", 4096, this, 18, &this->mic_task_handle_);
+
+#if defined(CONFIG_ESP_IDF_TASK_PINNING_ENABLED) && !CONFIG_FREERTOS_UNICORE
+    #ifdef CONFIG_ESP_IDF_FORCE_ALL_TASKS_TO_CORE_0
+        const BaseType_t core_id = 0;
+    #else
+        const BaseType_t core_id = CONFIG_ESP_IDF_MIC_TASK_CORE;
+    #endif
+    xTaskCreatePinnedToCore(I2SAudioMicrophone::mic_reader_task, "mic_read", 4096, this, 18, &this->mic_task_handle_, core_id);
+#else
+    xTaskCreate(I2SAudioMicrophone::mic_reader_task, "mic_read", 4096, this, 18, &this->mic_task_handle_);
+#endif
 
   this->state_ = RUNNING;
   ESP_LOGI(TAG, "Microphone started");

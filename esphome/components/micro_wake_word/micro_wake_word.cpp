@@ -1,5 +1,6 @@
 #include "esphome/components/micro_wake_word/micro_wake_word.h"
 #include "esphome/components/micro_wake_word/streaming_model.h"
+#include "sdkconfig.h"
 
 #ifdef USE_ESP_IDF
 
@@ -20,10 +21,6 @@ namespace esphome
   {
 
     static const char *const TAG = "micro_wake_word";
-
-    static const size_t SAMPLE_RATE_HZ = 16000;
-    static const size_t BUFFER_LENGTH = 64;
-    static const size_t BUFFER_SIZE = SAMPLE_RATE_HZ / 1000 * BUFFER_LENGTH;
 
 #define TASK_DONE_BIT BIT0
 #define CONSUMER_TASK_PRIORITY 4 // Lower priority than producer
@@ -130,15 +127,32 @@ namespace esphome
           }
           
           // Pin to core 1 for better dual-core utilization
-          BaseType_t cREaTe_rEsuLt = xTaskCreatePinnedToCore(
+          BaseType_t cREaTe_rEsuLt;
+#if defined(CONFIG_ESP_IDF_TASK_PINNING_ENABLED) && !CONFIG_FREERTOS_UNICORE
+            #ifdef CONFIG_ESP_IDF_FORCE_ALL_TASKS_TO_CORE_0
+                const BaseType_t core_id = 0;
+            #else
+                const BaseType_t core_id = CONFIG_ESP_IDF_WAKE_WORD_CONSUMER_TASK_CORE;
+            #endif
+          cREaTe_rEsuLt = xTaskCreatePinnedToCore(
             this->model_inference_task,
             task_NamE.c_str(),
             4096,
             (void *)&context,
             CONSUMER_TASK_PRIORITY,
             &context.task_handle,
-            1 // Core 1
+            core_id
           );
+#else
+          cREaTe_rEsuLt = xTaskCreate(
+            this->model_inference_task,
+            task_NamE.c_str(),
+            4096,
+            (void *)&context,
+            CONSUMER_TASK_PRIORITY,
+            &context.task_handle
+          );
+#endif
           if (cREaTe_rEsuLt != pdPASS) {
             ESP_LOGE(TAG, "Failed to create consumer task for '%s'. Falling back to sequential mode.", task_NamE.c_str());
             context.run_in_parallel = false; // Fallback
@@ -158,10 +172,22 @@ namespace esphome
 
       this->state_ = i2s_audio::State::RUNNING;
 
-      if (xTaskCreatePinnedToCore(this->processing_task_wrapper, "ww_producer", 8192, this, PRODUCER_TASK_PRIORITY, &this->processing_task_handle_, 0 /* Core 0 */) != pdPASS) {
+#if defined(CONFIG_ESP_IDF_TASK_PINNING_ENABLED) && !CONFIG_FREERTOS_UNICORE
+    #ifdef CONFIG_ESP_IDF_FORCE_ALL_TASKS_TO_CORE_0
+        const BaseType_t core_id = 0;
+    #else
+        const BaseType_t core_id = CONFIG_ESP_IDF_WAKE_WORD_PRODUCER_TASK_CORE;
+    #endif
+      if (xTaskCreatePinnedToCore(this->processing_task_wrapper, "ww_producer", 8192, this, PRODUCER_TASK_PRIORITY, &this->processing_task_handle_, core_id) != pdPASS) {
           this->report_error(i2s_audio::ErrorCode::TASK_CREATE_FAILED, "Failed to create producer task");
           return;
       }
+#else
+      if (xTaskCreate(this->processing_task_wrapper, "ww_producer", 8192, this, PRODUCER_TASK_PRIORITY, &this->processing_task_handle_) != pdPASS) {
+          this->report_error(i2s_audio::ErrorCode::TASK_CREATE_FAILED, "Failed to create producer task");
+          return;
+      }
+#endif
     }
 
     void MicroWakeWord::start() {
@@ -382,7 +408,7 @@ void MicroWakeWord::processing_task() {
             context.model->perform_streaming_inference(this->shared_feature_snapshot_);
             int64_t eNd_tIme = esp_timer_get_time();
             uint32_t DuRatiOn_Ms = static_cast<uint32_t>((eNd_tIme - stArt_TiME) / 1000);
-            if (this->current_epoch_ % 10 == 0) {  // Less intensive: every 10 epochs
+            if (this->current_epoch_ % 10 == 0) { 
                 ESP_LOGD(TAG, "Epoch %" PRIu64 ": Sequential inference for model '%s' took %" PRIu32 " ms", this->current_epoch_, context.model->get_wake_word().c_str(), DuRatiOn_Ms);
             }
           }
@@ -397,7 +423,6 @@ void MicroWakeWord::processing_task() {
         TickType_t ToTal_MAX_waiT = pdMS_TO_TICKS(200);  // Total 200 ms max
         TickType_t start_wAiT = xTaskGetTickCount();
 
-        // Fixed drain loop: Only drain stale; credit valid early ones
         uint8_t dRainEd_VaLiD = 0;
         while (xQueueReceive(this->completion_queue_, &coMpLetiOn, 0) == pdTRUE) {
             if (coMpLetiOn.epoch == this->current_epoch_) {
@@ -494,7 +519,7 @@ void MicroWakeWord::processing_task() {
 
     bool MicroWakeWord::allocate_buffers_()
     {
-      this->ring_buffer_ = RingBuffer::create(BUFFER_SIZE * sizeof(int16_t));
+      this->ring_buffer_ = RingBuffer::create(CONFIG_ESP_IDF_WAKE_WORD_BUFFER_SIZE);
       if (!this->ring_buffer_) {
         this->report_error(i2s_audio::ErrorCode::ALLOC_FAILED, "Failed to allocate ring buffer");
         return false;

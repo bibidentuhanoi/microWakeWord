@@ -3,7 +3,7 @@
 This project is a standalone C++ library for ESP32, providing solid I2S audio components for microphone, speaker, and wake word detection. The core components are derived from the excellent work done in the [ESPHome project](https://esphome.io/) and have been refactored to be used as a self-contained ESP-IDF library.
 
 > ⚠️ **Hardware Compatibility Note**
-> At the moment, this library is intended for and has been tested on **dual-core ESP32 variants with PSRAM enabled**.
+> At the moment, this library is intended for and has been tested on **ESP32 variants with PSRAM enabled**.
 
 
 ## Introduction
@@ -134,6 +134,17 @@ Finally, start the wake word detection engine.
 ```cpp
 wake_word.start();
 ```
+## Configuration
+
+This component can be configured via the project configuration menu. Run the following command:
+
+```
+idf.py menuconfig
+```
+
+Navigate to `Component config` -> `Microwakeword-IDF Configuration` to adjust the following settings:
+- **Task Core Pinning:** Assign specific CPU cores to the audio and wake word tasks, or force all tasks to a single core for debugging.
+- **Buffer Sizes:** Adjust the memory allocated for the speaker and wake word ring buffers to tune performance and memory usage.
 
 ## Architecture
 
@@ -147,4 +158,4 @@ The library is designed around a few core principles to ensure stability and mod
 
   - [ ] Add a guide or Jupyter/Colab notebook for training custom wake word models.
   - [ ] Add more complete examples.
-  - [ ] Test on other ESP32 variants.
+  - [✔️] Test on other ESP32 variants.

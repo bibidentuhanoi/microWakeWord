@@ -1,5 +1,3 @@
-// Updated i2s_audio_speaker.h
-// i2s_audio_speaker.h
 #pragma once
 
 #ifdef USE_ESP32
@@ -60,7 +58,7 @@ namespace esphome
 
             // New member variables
             std::unique_ptr<RingBuffer> buffer_;
-            size_t buffer_size_{65536};
+            size_t buffer_size_;
             TaskHandle_t task_handle_{nullptr};
             SemaphoreHandle_t completion_semaphore_{nullptr};
             SemaphoreHandle_t buffer_mutex_{nullptr};
